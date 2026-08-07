@@ -115,6 +115,7 @@ const getPrefabricatedVias = (input: SimpleRouteJson): PrefabricatedVia[] =>
         prefabViaId:
           obstacle.obstacleId ??
           obstacle.componentId ??
+          obstacle.connectedTo.find((id) => id.startsWith("pcb_via")) ??
           `prefabricated-via-${obstacleIndex}`,
         obstacleIndex,
         x: obstacle.center.x,
