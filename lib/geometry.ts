@@ -1,46 +1,99 @@
-import type { GraphicsObject } from "graphics-debug";
-import type {
-  Point,
-  PreparedBiscuitRoutingProblem,
-  RectBounds,
-  RoutedConnection,
-  RoutingEdge,
-} from "./types";
+import type { Point, RectBounds } from "./types";
 
 const EPSILON = 1e-7;
 
-export const pointsEqual = (a: Point, b: Point, epsilon = EPSILON) =>
-  Math.abs(a.x - b.x) <= epsilon && Math.abs(a.y - b.y) <= epsilon;
-
-export const pointDistance = (a: Point, b: Point) =>
+export const pointDistance = (a: Point, b: Point): number =>
   Math.hypot(a.x - b.x, a.y - b.y);
 
-export const pointStrictlyInsideRect = (point: Point, rect: RectBounds) =>
+export const pointsEqual = (a: Point, b: Point, epsilon = EPSILON): boolean =>
+  Math.abs(a.x - b.x) <= epsilon && Math.abs(a.y - b.y) <= epsilon;
+
+const cross = (a: Point, b: Point, c: Point): number =>
+  (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+
+const pointOnSegment = (a: Point, b: Point, point: Point): boolean =>
+  Math.abs(cross(a, b, point)) <= EPSILON &&
+  point.x >= Math.min(a.x, b.x) - EPSILON &&
+  point.x <= Math.max(a.x, b.x) + EPSILON &&
+  point.y >= Math.min(a.y, b.y) - EPSILON &&
+  point.y <= Math.max(a.y, b.y) + EPSILON;
+
+export const segmentsIntersect = (
+  firstStart: Point,
+  firstEnd: Point,
+  secondStart: Point,
+  secondEnd: Point,
+): boolean => {
+  const c1 = cross(firstStart, firstEnd, secondStart);
+  const c2 = cross(firstStart, firstEnd, secondEnd);
+  const c3 = cross(secondStart, secondEnd, firstStart);
+  const c4 = cross(secondStart, secondEnd, firstEnd);
+  if (
+    ((c1 > EPSILON && c2 < -EPSILON) || (c1 < -EPSILON && c2 > EPSILON)) &&
+    ((c3 > EPSILON && c4 < -EPSILON) || (c3 < -EPSILON && c4 > EPSILON))
+  ) {
+    return true;
+  }
+  return (
+    pointOnSegment(firstStart, firstEnd, secondStart) ||
+    pointOnSegment(firstStart, firstEnd, secondEnd) ||
+    pointOnSegment(secondStart, secondEnd, firstStart) ||
+    pointOnSegment(secondStart, secondEnd, firstEnd)
+  );
+};
+
+const pointToSegmentDistance = (
+  point: Point,
+  start: Point,
+  end: Point,
+): number => {
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const lengthSquared = dx * dx + dy * dy;
+  if (lengthSquared <= EPSILON) return pointDistance(point, start);
+  const projection = Math.max(
+    0,
+    Math.min(
+      1,
+      ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared,
+    ),
+  );
+  return pointDistance(point, {
+    x: start.x + projection * dx,
+    y: start.y + projection * dy,
+  });
+};
+
+export const segmentDistance = (
+  firstStart: Point,
+  firstEnd: Point,
+  secondStart: Point,
+  secondEnd: Point,
+): number => {
+  if (segmentsIntersect(firstStart, firstEnd, secondStart, secondEnd)) return 0;
+  return Math.min(
+    pointToSegmentDistance(firstStart, secondStart, secondEnd),
+    pointToSegmentDistance(firstEnd, secondStart, secondEnd),
+    pointToSegmentDistance(secondStart, firstStart, firstEnd),
+    pointToSegmentDistance(secondEnd, firstStart, firstEnd),
+  );
+};
+
+export const pointStrictlyInsideRect = (
+  point: Point,
+  rect: RectBounds,
+): boolean =>
   point.x > rect.minX + EPSILON &&
   point.x < rect.maxX - EPSILON &&
   point.y > rect.minY + EPSILON &&
   point.y < rect.maxY - EPSILON;
 
-export const obstacleBounds = (
-  obstacle: {
-    center: Point;
-    width: number;
-    height: number;
-  },
-  margin = 0,
-): RectBounds => ({
-  minX: obstacle.center.x - obstacle.width / 2 - margin,
-  maxX: obstacle.center.x + obstacle.width / 2 + margin,
-  minY: obstacle.center.y - obstacle.height / 2 - margin,
-  maxY: obstacle.center.y + obstacle.height / 2 + margin,
-});
-
-/** Liang-Barsky clipping against a slightly shrunken rectangle. */
+/** Liang-Barsky clipping against the interior of an axis-aligned rectangle. */
 export const segmentIntersectsRectInterior = (
   start: Point,
   end: Point,
   rect: RectBounds,
-) => {
+): boolean => {
   const interior = {
     minX: rect.minX + EPSILON,
     maxX: rect.maxX - EPSILON,
@@ -62,7 +115,7 @@ export const segmentIntersectsRectInterior = (
   ];
   let low = 0;
   let high = 1;
-  for (let index = 0; index < 4; index++) {
+  for (let index = 0; index < 4; index += 1) {
     if (Math.abs(p[index]!) <= EPSILON) {
       if (q[index]! < 0) return false;
       continue;
@@ -75,159 +128,26 @@ export const segmentIntersectsRectInterior = (
   return high >= 0 && low <= 1;
 };
 
-const cross = (a: Point, b: Point, c: Point) =>
-  (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+export const getRectCorners = (rect: RectBounds): Point[] => [
+  { x: rect.minX, y: rect.minY },
+  { x: rect.minX, y: rect.maxY },
+  { x: rect.maxX, y: rect.minY },
+  { x: rect.maxX, y: rect.maxY },
+];
 
-const onSegment = (a: Point, b: Point, point: Point) =>
-  Math.abs(cross(a, b, point)) <= EPSILON &&
-  point.x >= Math.min(a.x, b.x) - EPSILON &&
-  point.x <= Math.max(a.x, b.x) + EPSILON &&
-  point.y >= Math.min(a.y, b.y) - EPSILON &&
-  point.y <= Math.max(a.y, b.y) + EPSILON;
+export const boundsOverlap = (first: RectBounds, second: RectBounds): boolean =>
+  first.minX <= second.maxX &&
+  first.maxX >= second.minX &&
+  first.minY <= second.maxY &&
+  first.maxY >= second.minY;
 
-export const segmentsIntersect = (
-  firstStart: Point,
-  firstEnd: Point,
-  secondStart: Point,
-  secondEnd: Point,
-) => {
-  const c1 = cross(firstStart, firstEnd, secondStart);
-  const c2 = cross(firstStart, firstEnd, secondEnd);
-  const c3 = cross(secondStart, secondEnd, firstStart);
-  const c4 = cross(secondStart, secondEnd, firstEnd);
-  if (
-    ((c1 > EPSILON && c2 < -EPSILON) || (c1 < -EPSILON && c2 > EPSILON)) &&
-    ((c3 > EPSILON && c4 < -EPSILON) || (c3 < -EPSILON && c4 > EPSILON))
-  ) {
-    return true;
-  }
-  return (
-    onSegment(firstStart, firstEnd, secondStart) ||
-    onSegment(firstStart, firstEnd, secondEnd) ||
-    onSegment(secondStart, secondEnd, firstStart) ||
-    onSegment(secondStart, secondEnd, firstEnd)
-  );
-};
-
-const pointToSegmentDistance = (point: Point, start: Point, end: Point) => {
-  const dx = end.x - start.x;
-  const dy = end.y - start.y;
-  const lengthSquared = dx * dx + dy * dy;
-  if (lengthSquared <= EPSILON) return pointDistance(point, start);
-  const t = Math.max(
-    0,
-    Math.min(
-      1,
-      ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared,
-    ),
-  );
-  return pointDistance(point, { x: start.x + t * dx, y: start.y + t * dy });
-};
-
-export const segmentDistance = (
-  firstStart: Point,
-  firstEnd: Point,
-  secondStart: Point,
-  secondEnd: Point,
-) => {
-  if (segmentsIntersect(firstStart, firstEnd, secondStart, secondEnd)) return 0;
-  return Math.min(
-    pointToSegmentDistance(firstStart, secondStart, secondEnd),
-    pointToSegmentDistance(firstEnd, secondStart, secondEnd),
-    pointToSegmentDistance(secondStart, firstStart, firstEnd),
-    pointToSegmentDistance(secondEnd, firstStart, firstEnd),
-  );
-};
-
-export const getEdgePoints = (
-  prepared: PreparedBiscuitRoutingProblem,
-  edge: RoutingEdge,
-) => [prepared.nodes[edge.fromNode]!, prepared.nodes[edge.toNode]!] as const;
-
-export const netColor = (name: string) => {
-  let hash = 0;
-  for (const character of name)
-    hash = (hash * 31 + character.charCodeAt(0)) | 0;
-  const hue = Math.abs(hash) % 360;
-  return `hsl(${hue} 72% 42%)`;
-};
-
-export const visualizePreparedProblem = (
-  prepared: PreparedBiscuitRoutingProblem,
-  routes: Iterable<RoutedConnection> = [],
-): GraphicsObject => {
-  const lines: NonNullable<GraphicsObject["lines"]> = [];
-  const points: NonNullable<GraphicsObject["points"]> = [];
-  const rects: NonNullable<GraphicsObject["rects"]> = [];
-  const maximumTraceWidth = Math.max(
-    prepared.input.minTraceWidth,
-    prepared.input.nominalTraceWidth ?? 0,
-    ...prepared.demands.map((demand) => demand.width),
-  );
-  const margin =
-    maximumTraceWidth / 2 +
-    Math.max(
-      prepared.options.gridClearance,
-      prepared.input.minTraceToPadEdgeClearance ?? 0,
-    );
-
-  for (const obstacle of prepared.input.obstacles) {
-    if (obstacle.isCopperPour) continue;
-    const bounds = obstacleBounds(obstacle, margin);
-    rects.push({
-      center: {
-        x: (bounds.minX + bounds.maxX) / 2,
-        y: (bounds.minY + bounds.maxY) / 2,
-      },
-      width: bounds.maxX - bounds.minX,
-      height: bounds.maxY - bounds.minY,
-      fill: obstacle.netIsAssignable
-        ? "rgba(14,165,233,0.20)"
-        : "rgba(239,68,68,0.12)",
-      stroke: obstacle.netIsAssignable
-        ? "rgba(2,132,199,0.7)"
-        : "rgba(220,38,38,0.35)",
-    });
-  }
-
-  for (const edge of prepared.edges) {
-    const [from, to] = getEdgePoints(prepared, edge);
-    if (edge.kind === "trace") {
-      lines.push({
-        points: [from, to],
-        strokeColor: "rgba(100,116,139,0.10)",
-        strokeWidth: 0.025,
-      });
-    } else {
-      points.push({
-        ...from,
-        color: "rgba(14,165,233,0.75)",
-        label: edge.prefabViaId,
-      });
-    }
-  }
-
-  for (const route of routes) {
-    const color = netColor(route.netId);
-    for (const edgeId of route.edgePath) {
-      const edge = prepared.edges[edgeId]!;
-      const [from, to] = getEdgePoints(prepared, edge);
-      if (edge.kind === "trace") {
-        lines.push({
-          points: [from, to],
-          strokeColor: color,
-          strokeWidth: 0.18,
-        });
-      } else {
-        points.push({ ...from, color, label: `fixed via · ${route.netId}` });
-      }
-    }
-  }
-
-  return {
-    title: `Fixed-via routing hypergraph (${prepared.nodes.length} nodes, ${prepared.edges.length} hyperedges)`,
-    lines,
-    points,
-    rects,
-  };
-};
+export const segmentBounds = (
+  start: Point,
+  end: Point,
+  margin = 0,
+): RectBounds => ({
+  minX: Math.min(start.x, end.x) - margin,
+  minY: Math.min(start.y, end.y) - margin,
+  maxX: Math.max(start.x, end.x) + margin,
+  maxY: Math.max(start.y, end.y) + margin,
+});
