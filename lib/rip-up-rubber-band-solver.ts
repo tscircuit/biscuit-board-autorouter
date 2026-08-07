@@ -426,6 +426,36 @@ export class RipUpRubberBandSolver extends BaseSolver {
         }
       }
     }
+    const routes = [...this.committed.values()];
+    for (let firstIndex = 0; firstIndex < routes.length; firstIndex++) {
+      for (
+        let secondIndex = firstIndex + 1;
+        secondIndex < routes.length;
+        secondIndex++
+      ) {
+        const first = routes[firstIndex]!;
+        const second = routes[secondIndex]!;
+        if (first.netId === second.netId) continue;
+        const secondTraceEdges = new Set(
+          second.edgePath.filter(
+            (edgeId) => this.prepared.edges[edgeId]!.kind === "trace",
+          ),
+        );
+        for (const firstEdgeId of first.edgePath) {
+          const firstEdge = this.prepared.edges[firstEdgeId]!;
+          if (firstEdge.kind !== "trace") continue;
+          if (
+            firstEdge.conflictEdgeIds.some((edgeId) =>
+              secondTraceEdges.has(edgeId),
+            )
+          ) {
+            throw new Error(
+              `Final routes "${first.routeId}" and "${second.routeId}" violate trace clearance`,
+            );
+          }
+        }
+      }
+    }
   }
 
   private fail(message: string) {

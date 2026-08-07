@@ -5,8 +5,8 @@ import {
   pointDistance,
   pointStrictlyInsideRect,
   pointsEqual,
+  segmentDistance,
   segmentIntersectsRectInterior,
-  segmentsIntersect,
   visualizePreparedProblem,
 } from "./geometry";
 import type {
@@ -30,15 +30,15 @@ const nodeKey = (layer: string, x: number, y: number) =>
 
 const DEFAULT_OPTIONS: NormalizedBiscuitBoardAutorouterOptions = {
   routeOrder: "longest_first",
-  gridPitch: 2,
+  gridPitch: 1.5,
   gridClearance: 0.1,
   viaTransitionCost: 0.4,
   ripCost: 10,
   crossingCost: 0.25,
-  historyIncrement: 2,
-  maxBlockersPerSearch: 4,
-  maxRipsPerRoute: 8,
-  maxTotalRips: 120,
+  historyIncrement: 4,
+  maxBlockersPerSearch: 12,
+  maxRipsPerRoute: 30,
+  maxTotalRips: 500,
   maxSearchStates: 150_000,
   expansionsPerStep: 300,
 };
@@ -122,11 +122,17 @@ const getPrefabricatedVias = (input: SimpleRouteJson): PrefabricatedVia[] =>
 const uniqueSorted = (values: number[]) =>
   [...new Set(values.map(roundCoordinate))].sort((a, b) => a - b);
 
-const isInsideBounds = (input: SimpleRouteJson, point: Point) =>
-  point.x >= input.bounds.minX &&
-  point.x <= input.bounds.maxX &&
-  point.y >= input.bounds.minY &&
-  point.y <= input.bounds.maxY;
+const isInsideBounds = (
+  input: SimpleRouteJson,
+  point: Point,
+  boardEdgeMargin: number,
+  isSpecial: boolean,
+) =>
+  isSpecial ||
+  (point.x >= input.bounds.minX + boardEdgeMargin &&
+    point.x <= input.bounds.maxX - boardEdgeMargin &&
+    point.y >= input.bounds.minY + boardEdgeMargin &&
+    point.y <= input.bounds.maxY - boardEdgeMargin);
 
 const obstacleIsOnLayer = (
   obstacle: SimpleRouteJson["obstacles"][number],
@@ -309,7 +315,11 @@ const buildDemands = (
   return demands;
 };
 
-const addConflictPairs = (edges: RoutingEdge[], nodes: RoutingNode[]) => {
+const addConflictPairs = (
+  edges: RoutingEdge[],
+  nodes: RoutingNode[],
+  minimumTraceCenterDistance: number,
+) => {
   const traceEdges = edges.filter(
     (edge): edge is Extract<RoutingEdge, { kind: "trace" }> =>
       edge.kind === "trace",
@@ -320,10 +330,18 @@ const addConflictPairs = (edges: RoutingEdge[], nodes: RoutingNode[]) => {
   for (const edge of traceEdges) {
     const from = nodes[edge.fromNode]!;
     const to = nodes[edge.toNode]!;
-    const minBucketX = Math.floor(Math.min(from.x, to.x) / bucketSize);
-    const maxBucketX = Math.floor(Math.max(from.x, to.x) / bucketSize);
-    const minBucketY = Math.floor(Math.min(from.y, to.y) / bucketSize);
-    const maxBucketY = Math.floor(Math.max(from.y, to.y) / bucketSize);
+    const minBucketX = Math.floor(
+      (Math.min(from.x, to.x) - minimumTraceCenterDistance) / bucketSize,
+    );
+    const maxBucketX = Math.floor(
+      (Math.max(from.x, to.x) + minimumTraceCenterDistance) / bucketSize,
+    );
+    const minBucketY = Math.floor(
+      (Math.min(from.y, to.y) - minimumTraceCenterDistance) / bucketSize,
+    );
+    const maxBucketY = Math.floor(
+      (Math.max(from.y, to.y) + minimumTraceCenterDistance) / bucketSize,
+    );
     const candidateIds = new Set<number>();
     for (let x = minBucketX; x <= maxBucketX; x++) {
       for (let y = minBucketY; y <= maxBucketY; y++) {
@@ -344,7 +362,8 @@ const addConflictPairs = (edges: RoutingEdge[], nodes: RoutingNode[]) => {
       const candidateTo = nodes[candidate.toNode]!;
       if (
         from.layer === candidateFrom.layer &&
-        segmentsIntersect(from, to, candidateFrom, candidateTo)
+        segmentDistance(from, to, candidateFrom, candidateTo) <
+          minimumTraceCenterDistance - 1e-7
       ) {
         edge.conflictEdgeIds.push(candidateId);
         candidate.conflictEdgeIds.push(edge.edgeId);
@@ -376,22 +395,30 @@ export const generateBiscuitBoardHypergraph = (
   const layers = getLayers(input);
   const prefabricatedVias = getPrefabricatedVias(input);
   const margin = input.minTraceWidth / 2 + options.gridClearance;
-  const xCoordinates = [input.bounds.minX, input.bounds.maxX];
-  const yCoordinates = [input.bounds.minY, input.bounds.maxY];
+  const boardEdgeMargin =
+    (input.minBoardEdgeClearance ?? 0) + input.minTraceWidth / 2;
+  const xCoordinates = [
+    input.bounds.minX + boardEdgeMargin,
+    input.bounds.maxX - boardEdgeMargin,
+  ];
+  const yCoordinates = [
+    input.bounds.minY + boardEdgeMargin,
+    input.bounds.maxY - boardEdgeMargin,
+  ];
 
   // Wide free-space regions need more than one routing channel. A lightweight
   // regular lattice provides parallel lanes while the obstacle-derived sweep
   // lines retain exact corner and terminal geometry.
   for (
-    let x = input.bounds.minX + options.gridPitch;
-    x < input.bounds.maxX;
+    let x = input.bounds.minX + boardEdgeMargin + options.gridPitch;
+    x < input.bounds.maxX - boardEdgeMargin;
     x += options.gridPitch
   ) {
     xCoordinates.push(x);
   }
   for (
-    let y = input.bounds.minY + options.gridPitch;
-    y < input.bounds.maxY;
+    let y = input.bounds.minY + boardEdgeMargin + options.gridPitch;
+    y < input.bounds.maxY - boardEdgeMargin;
     y += options.gridPitch
   ) {
     yCoordinates.push(y);
@@ -435,13 +462,23 @@ export const generateBiscuitBoardHypergraph = (
     for (const x of xs) {
       for (const y of ys) {
         const point = { x, y };
-        if (!isInsideBounds(input, point)) continue;
         const special = getSpecialNodeMetadata(
           input,
           prefabricatedVias,
           layer,
           point,
         );
+        if (
+          !isInsideBounds(
+            input,
+            point,
+            boardEdgeMargin,
+            special.terminalConnectionNames.length > 0 ||
+              Boolean(special.prefabVia),
+          )
+        ) {
+          continue;
+        }
         if (
           nodeIsBlocked(input, layer, point, margin, special) &&
           special.terminalConnectionNames.length === 0 &&
@@ -547,7 +584,7 @@ export const generateBiscuitBoardHypergraph = (
     }
   }
 
-  addConflictPairs(edges, nodes);
+  addConflictPairs(edges, nodes, input.minTraceWidth);
   const demands = buildDemands(input, nodeIndexByKey);
   return {
     input,

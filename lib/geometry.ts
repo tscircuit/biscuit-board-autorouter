@@ -109,6 +109,36 @@ export const segmentsIntersect = (
   );
 };
 
+const pointToSegmentDistance = (point: Point, start: Point, end: Point) => {
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const lengthSquared = dx * dx + dy * dy;
+  if (lengthSquared <= EPSILON) return pointDistance(point, start);
+  const t = Math.max(
+    0,
+    Math.min(
+      1,
+      ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared,
+    ),
+  );
+  return pointDistance(point, { x: start.x + t * dx, y: start.y + t * dy });
+};
+
+export const segmentDistance = (
+  firstStart: Point,
+  firstEnd: Point,
+  secondStart: Point,
+  secondEnd: Point,
+) => {
+  if (segmentsIntersect(firstStart, firstEnd, secondStart, secondEnd)) return 0;
+  return Math.min(
+    pointToSegmentDistance(firstStart, secondStart, secondEnd),
+    pointToSegmentDistance(firstEnd, secondStart, secondEnd),
+    pointToSegmentDistance(secondStart, firstStart, firstEnd),
+    pointToSegmentDistance(secondEnd, firstStart, firstEnd),
+  );
+};
+
 export const getEdgePoints = (
   prepared: PreparedBiscuitRoutingProblem,
   edge: RoutingEdge,
