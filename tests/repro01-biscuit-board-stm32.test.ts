@@ -32,6 +32,7 @@ test("solves the exact BiscuitBoard STM32C071 real-project input", () => {
   expect(output!.traces).toHaveLength(17);
   expect(output!.stats.postProcessedClearance).toBe(0.2);
   expect(output!.stats.chamferedCornerCount).toBeGreaterThan(0);
+  expect(output!.stats.fixedViaTransitionCount).toBe(0);
   const prepared = solver.getStageOutput<PreparedBiscuitRoutingProblem>(
     "generate-hypergraph",
   );
