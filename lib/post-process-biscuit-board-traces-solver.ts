@@ -100,12 +100,12 @@ const obstacleAllowsSegment = (
   }
   return (
     obstacle.netIsAssignable === true &&
-    segmentDistance(
-      segment.start,
-      segment.end,
-      obstacle.center,
-      obstacle.center,
-    ) <= EPSILON
+    context.trace.route.some(
+      (point) =>
+        point.route_type === "via" && pointsEqual(point, obstacle.center),
+    ) &&
+    (pointsEqual(segment.start, obstacle.center) ||
+      pointsEqual(segment.end, obstacle.center))
   );
 };
 

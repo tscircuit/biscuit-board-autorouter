@@ -208,6 +208,21 @@ export class RipUpRubberBandSolver extends BaseSolver {
   ) {
     const parent = search.nodes[parentIndex]!;
     const edge = this.prepared.edges[edgeId]!;
+    const parentEdge =
+      parent.edgeFromParent === null
+        ? null
+        : this.prepared.edges[parent.edgeFromParent]!;
+    const currentNode = this.prepared.nodes[parent.graphNode]!;
+    // Merely crossing an assignable via on one layer does not electrically
+    // claim it in Circuit JSON. Once a route enters a prefab-via node through
+    // copper, it must take the fixed layer transition before leaving.
+    if (
+      currentNode.kind === "fixed_via" &&
+      parentEdge?.kind === "trace" &&
+      edge.kind === "trace"
+    ) {
+      return;
+    }
     if (!this.nodeAllowsDemand(toNode, search.demand)) return;
     if (!this.edgeAllowsDemand(edge, search.demand)) return;
 
