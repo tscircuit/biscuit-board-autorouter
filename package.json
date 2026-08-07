@@ -3,6 +3,7 @@
   "version": "0.0.1",
   "description": "Fixed-via rubber-band autorouter for prefabricated biscuit boards",
   "type": "module",
+  "main": "lib/index.ts",
   "module": "lib/index.ts",
   "license": "MIT",
   "files": [
