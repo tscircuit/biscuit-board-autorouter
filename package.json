@@ -1,0 +1,56 @@
+{
+  "name": "@tscircuit/biscuit-board-autorouter",
+  "version": "0.0.1",
+  "description": "Fixed-via rubber-band autorouter for prefabricated biscuit boards",
+  "type": "module",
+  "module": "lib/index.ts",
+  "license": "MIT",
+  "files": [
+    "lib"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tscircuit/biscuit-board-autorouter.git"
+  },
+  "exports": {
+    ".": {
+      "import": "./lib/index.ts",
+      "types": "./lib/index.ts"
+    }
+  },
+  "scripts": {
+    "build": "bunx tsc --noEmit",
+    "build:site": "cosmos-export",
+    "dev": "cosmos",
+    "start": "cosmos",
+    "test": "bun run setup:test-deps && bun test",
+    "setup:test-deps": "bun run --cwd node_modules/sharp install",
+    "format": "biome format --write .",
+    "format:check": "biome format ."
+  },
+  "dependencies": {
+    "@tscircuit/core": "^0.0.1621",
+    "@tscircuit/props": "^0.0.617",
+    "@tscircuit/solver-utils": "^0.0.17",
+    "graphics-debug": "^0.0.93"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.6",
+    "@types/bun": "latest",
+    "@types/react": "^19.2.0",
+    "bun-match-svg": "^0.0.15",
+    "react": "^19.2.0",
+    "react-cosmos": "^7.2.0",
+    "react-cosmos-plugin-vite": "^7.2.0",
+    "react-dom": "^19.2.0",
+    "sharp": "0.32.6",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.0"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "trustedDependencies": [
+    "sharp"
+  ]
+}

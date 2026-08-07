@@ -1,0 +1,131 @@
+import type { SimpleRouteJson, SimplifiedPcbTrace } from "@tscircuit/core";
+
+export type Point = { x: number; y: number };
+
+export interface RectBounds {
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+}
+
+export interface BiscuitBoardAutorouterOptions {
+  gridClearance?: number;
+  viaTransitionCost?: number;
+  ripCost?: number;
+  crossingCost?: number;
+  historyIncrement?: number;
+  maxBlockersPerSearch?: number;
+  maxRipsPerRoute?: number;
+  maxTotalRips?: number;
+  maxSearchStates?: number;
+  expansionsPerStep?: number;
+}
+
+export interface NormalizedBiscuitBoardAutorouterOptions {
+  gridClearance: number;
+  viaTransitionCost: number;
+  ripCost: number;
+  crossingCost: number;
+  historyIncrement: number;
+  maxBlockersPerSearch: number;
+  maxRipsPerRoute: number;
+  maxTotalRips: number;
+  maxSearchStates: number;
+  expansionsPerStep: number;
+}
+
+export type RoutingNodeKind = "grid" | "terminal" | "fixed_via";
+
+export interface RoutingNode extends Point {
+  nodeId: string;
+  layer: string;
+  kind: RoutingNodeKind;
+  terminalPointIds: string[];
+  terminalConnectionNames: string[];
+  prefabViaId?: string;
+}
+
+export type RoutingEdge =
+  | {
+      edgeId: number;
+      key: string;
+      kind: "trace";
+      fromNode: number;
+      toNode: number;
+      cost: number;
+      blockingObstacleIndexes: number[];
+      conflictEdgeIds: number[];
+    }
+  | {
+      edgeId: number;
+      key: string;
+      kind: "fixed_via_transition";
+      fromNode: number;
+      toNode: number;
+      cost: number;
+      prefabViaId: string;
+    };
+
+export interface RoutingAdjacency {
+  edgeId: number;
+  toNode: number;
+}
+
+export interface RouteDemand {
+  routeId: string;
+  connectionName: string;
+  netId: string;
+  sourceNode: number;
+  targetNode: number;
+  sourcePointId?: string;
+  targetPointId?: string;
+  width: number;
+}
+
+export interface PrefabricatedVia extends Point {
+  prefabViaId: string;
+  obstacleIndex: number;
+  layers: string[];
+  width: number;
+  height: number;
+}
+
+export interface PreparedBiscuitRoutingProblem {
+  input: SimpleRouteJson;
+  options: NormalizedBiscuitBoardAutorouterOptions;
+  layers: string[];
+  nodes: RoutingNode[];
+  edges: RoutingEdge[];
+  adjacency: RoutingAdjacency[][];
+  demands: RouteDemand[];
+  demandById: Map<string, RouteDemand>;
+  prefabricatedVias: PrefabricatedVia[];
+  fixedViaById: Map<string, PrefabricatedVia>;
+}
+
+export interface RoutedConnection {
+  routeId: string;
+  connectionName: string;
+  netId: string;
+  nodePath: number[];
+  edgePath: number[];
+  blockerRouteIds: string[];
+}
+
+export interface BiscuitBoardRoutingStats {
+  routeCount: number;
+  routedCount: number;
+  pendingCount: number;
+  ripCount: number;
+  expandedStateCount: number;
+  fixedViaTransitionCount: number;
+  graphNodeCount: number;
+  graphEdgeCount: number;
+}
+
+export interface BiscuitBoardRoutingSolution {
+  routes: RoutedConnection[];
+  traces: SimplifiedPcbTrace[];
+  stats: BiscuitBoardRoutingStats;
+}

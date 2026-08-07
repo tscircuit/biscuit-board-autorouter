@@ -1,0 +1,26 @@
+name: Bun Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install
+      - run: bun run test
+      - name: Upload SVG diffs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-snapshots
+          path: tests/**/__snapshots__/*.diff.png
+          if-no-files-found: ignore
