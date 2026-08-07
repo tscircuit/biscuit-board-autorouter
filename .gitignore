@@ -1,4 +1,5 @@
 node_modules
 cosmos-export
+.vercel
 *.log
 *.tgz

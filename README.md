@@ -2,6 +2,8 @@
 
 A fixed-via autorouter for prefabricated tscircuit biscuit boards.
 
+**[Open the live Cosmos solver debugger](https://biscuit-board-autorouter.vercel.app)**
+
 The solver is deliberately unable to create arbitrary vias. It generates
 cross-layer hyperedges only for multi-layer Simple Route JSON obstacles marked
 `netIsAssignable: true`; the output stage independently rejects any via that
