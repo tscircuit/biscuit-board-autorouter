@@ -36,6 +36,8 @@ The exported `BiscuitBoardAutorouter` also implements tscircuit's
    negotiated rip-and-replace, and history costs.
 3. `BuildBiscuitBoardTracesSolver` removes redundant collinear vertices,
    creates tscircuit traces, and validates the fixed-via invariant again.
+4. `PostProcessBiscuitBoardTracesSolver` enforces 0.2 mm copper clearance and
+   replaces eligible 90-degree corners with clearance-safe 45-degree chamfers.
 
 This split is intentional: graph generation is independently visualizable and
 testable because it is the highest-risk part of the solver. See

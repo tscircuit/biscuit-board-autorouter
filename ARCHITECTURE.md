@@ -58,3 +58,11 @@ The topology makes arbitrary layer changes unreachable. The trace builder then
 performs a second, independent check: each emitted `route_type: "via"` must
 match the coordinate and both layers of a prefabricated via obstacle. A mismatch
 throws instead of silently manufacturing copper.
+
+## Trace post-processing
+
+The final pipeline stage validates 0.2 mm edge-to-edge copper clearance against
+foreign-net traces, pads, and prefabricated vias. It then considers each
+orthogonal corner independently. A corner is replaced by a pair of 45-degree
+segments only when the complete candidate output still passes that clearance
+check; otherwise the original Manhattan corner is retained.

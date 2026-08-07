@@ -31,7 +31,8 @@ const nodeKey = (layer: string, x: number, y: number) =>
 const DEFAULT_OPTIONS: NormalizedBiscuitBoardAutorouterOptions = {
   routeOrder: "longest_first",
   gridPitch: 1.5,
-  gridClearance: 0.1,
+  gridClearance: 0.2,
+  chamferDistance: 0.5,
   viaTransitionCost: 0.4,
   ripCost: 10,
   crossingCost: 0.25,
@@ -67,6 +68,12 @@ const normalizeOptions = (
     normalized.gridClearance < 0
   ) {
     throw new Error("options.gridClearance must be non-negative");
+  }
+  if (
+    !Number.isFinite(normalized.chamferDistance) ||
+    normalized.chamferDistance < 0
+  ) {
+    throw new Error("options.chamferDistance must be non-negative");
   }
   if (
     !Number.isFinite(normalized.crossingCost) ||
@@ -394,7 +401,19 @@ export const generateBiscuitBoardHypergraph = (
   const options = normalizeOptions(rawOptions);
   const layers = getLayers(input);
   const prefabricatedVias = getPrefabricatedVias(input);
-  const margin = input.minTraceWidth / 2 + options.gridClearance;
+  const maximumTraceWidth = Math.max(
+    input.minTraceWidth,
+    input.nominalTraceWidth ?? 0,
+    ...input.connections.map(
+      (connection) =>
+        connection.nominalTraceWidth ?? connection.width ?? input.minTraceWidth,
+    ),
+  );
+  const effectiveClearance = Math.max(
+    options.gridClearance,
+    input.minTraceToPadEdgeClearance ?? 0,
+  );
+  const margin = maximumTraceWidth / 2 + effectiveClearance;
   const boardEdgeMargin =
     (input.minBoardEdgeClearance ?? 0) + input.minTraceWidth / 2;
   const xCoordinates = [
@@ -584,11 +603,7 @@ export const generateBiscuitBoardHypergraph = (
     }
   }
 
-  addConflictPairs(
-    edges,
-    nodes,
-    input.minTraceWidth + (input.minTraceToPadEdgeClearance ?? 0.1),
-  );
+  addConflictPairs(edges, nodes, maximumTraceWidth + effectiveClearance);
   const demands = buildDemands(input, nodeIndexByKey);
   return {
     input,

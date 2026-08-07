@@ -7,6 +7,7 @@ import {
 import type { GraphicsObject } from "graphics-debug";
 import { BuildBiscuitBoardTracesSolver } from "./build-biscuit-board-traces-solver";
 import { GenerateBiscuitBoardHypergraphSolver } from "./generate-biscuit-board-hypergraph-solver";
+import { PostProcessBiscuitBoardTracesSolver } from "./post-process-biscuit-board-traces-solver";
 import { RipUpRubberBandSolver } from "./rip-up-rubber-band-solver";
 import type {
   BiscuitBoardAutorouterOptions,
@@ -51,6 +52,22 @@ export class BiscuitBoardRoutingPipelineSolver extends BasePipelineSolver<Simple
         return [{ prepared, routed }];
       },
     ),
+    definePipelineStep(
+      "post-process-traces",
+      PostProcessBiscuitBoardTracesSolver,
+      (instance: BiscuitBoardRoutingPipelineSolver) => {
+        const prepared = instance.getStageOutput<PreparedBiscuitRoutingProblem>(
+          "generate-hypergraph",
+        );
+        const built = instance.getStageOutput<BiscuitBoardRoutingSolution>(
+          "build-and-validate-traces",
+        );
+        if (!prepared || !built) {
+          throw new Error("Trace post-processing inputs are unavailable");
+        }
+        return [{ prepared, built }];
+      },
+    ),
   ];
 
   constructor(
@@ -78,9 +95,8 @@ export class BiscuitBoardRoutingPipelineSolver extends BasePipelineSolver<Simple
 
   override getOutput(): BiscuitBoardRoutingSolution | null {
     return (
-      this.getStageOutput<BiscuitBoardRoutingSolution>(
-        "build-and-validate-traces",
-      ) ?? null
+      this.getStageOutput<BiscuitBoardRoutingSolution>("post-process-traces") ??
+      null
     );
   }
 }

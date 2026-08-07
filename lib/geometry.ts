@@ -159,8 +159,17 @@ export const visualizePreparedProblem = (
   const lines: NonNullable<GraphicsObject["lines"]> = [];
   const points: NonNullable<GraphicsObject["points"]> = [];
   const rects: NonNullable<GraphicsObject["rects"]> = [];
+  const maximumTraceWidth = Math.max(
+    prepared.input.minTraceWidth,
+    prepared.input.nominalTraceWidth ?? 0,
+    ...prepared.demands.map((demand) => demand.width),
+  );
   const margin =
-    prepared.input.minTraceWidth / 2 + prepared.options.gridClearance;
+    maximumTraceWidth / 2 +
+    Math.max(
+      prepared.options.gridClearance,
+      prepared.input.minTraceToPadEdgeClearance ?? 0,
+    );
 
   for (const obstacle of prepared.input.obstacles) {
     if (obstacle.isCopperPour) continue;
