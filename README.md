@@ -52,5 +52,14 @@ bun run format:check
 ```
 
 Cosmos exposes the generated hypergraph and every live pipeline stage through
-`GenericSolverDebugger`. Tests include SVG matching, forced layer transitions,
-the no-prefabricated-via failure case, and negotiated rip-and-replace.
+`GenericSolverDebugger`:
+
+- `examples/exampleXX.page.tsx` contains small synthetic inputs that isolate
+  one solver behavior.
+- `repros/reproXX.page.tsx` contains exact, checked-in autorouter inputs
+  captured from real projects. Repro 01 is the complete BiscuitBoard
+  STM32C071FBP6 routing problem.
+
+Tests include SVG matching, forced layer transitions, the
+no-prefabricated-via failure case, negotiated rip-and-replace, and the complete
+STM32 real-project repro.

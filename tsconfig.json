@@ -6,6 +6,7 @@
     "strict": true,
     "skipLibCheck": true,
     "esModuleInterop": true,
+    "resolveJsonModule": true,
     "allowImportingTsExtensions": true,
     "jsx": "react-jsx",
     "types": ["bun-types"],
@@ -14,5 +15,5 @@
       "@tscircuit/biscuit-board-autorouter": ["./lib/index.ts"]
     }
   },
-  "include": ["lib", "tests", "pages", "vite.config.ts"]
+  "include": ["lib", "tests", "examples", "repros", "vite.config.ts"]
 }
