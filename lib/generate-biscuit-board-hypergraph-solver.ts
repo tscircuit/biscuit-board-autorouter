@@ -584,7 +584,11 @@ export const generateBiscuitBoardHypergraph = (
     }
   }
 
-  addConflictPairs(edges, nodes, input.minTraceWidth);
+  addConflictPairs(
+    edges,
+    nodes,
+    input.minTraceWidth + (input.minTraceToPadEdgeClearance ?? 0.1),
+  );
   const demands = buildDemands(input, nodeIndexByKey);
   return {
     input,
