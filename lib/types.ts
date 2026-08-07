@@ -10,6 +10,8 @@ export interface RectBounds {
 }
 
 export interface BiscuitBoardAutorouterOptions {
+  routeOrder?: "longest_first" | "shortest_first" | "input";
+  gridPitch?: number;
   gridClearance?: number;
   viaTransitionCost?: number;
   ripCost?: number;
@@ -23,6 +25,8 @@ export interface BiscuitBoardAutorouterOptions {
 }
 
 export interface NormalizedBiscuitBoardAutorouterOptions {
+  routeOrder: "longest_first" | "shortest_first" | "input";
+  gridPitch: number;
   gridClearance: number;
   viaTransitionCost: number;
   ripCost: number;

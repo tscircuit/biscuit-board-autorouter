@@ -29,6 +29,8 @@ const nodeKey = (layer: string, x: number, y: number) =>
   `${layer}:${coordinateKey(x)}:${coordinateKey(y)}`;
 
 const DEFAULT_OPTIONS: NormalizedBiscuitBoardAutorouterOptions = {
+  routeOrder: "longest_first",
+  gridPitch: 2,
   gridClearance: 0.1,
   viaTransitionCost: 0.4,
   ripCost: 10,
@@ -46,6 +48,7 @@ const normalizeOptions = (
 ): NormalizedBiscuitBoardAutorouterOptions => {
   const normalized = { ...DEFAULT_OPTIONS, ...options };
   for (const key of [
+    "gridPitch",
     "viaTransitionCost",
     "ripCost",
     "historyIncrement",
@@ -203,8 +206,57 @@ const buildDemands = (
   input: SimpleRouteJson,
   nodeIndexByKey: Map<string, number>,
 ): RouteDemand[] => {
+  const parent = input.connections.map((_, index) => index);
+  const find = (index: number): number => {
+    while (parent[index] !== index) {
+      parent[index] = parent[parent[index]!]!;
+      index = parent[index]!;
+    }
+    return index;
+  };
+  const union = (left: number, right: number) => {
+    const leftRoot = find(left);
+    const rightRoot = find(right);
+    if (leftRoot !== rightRoot) parent[rightRoot] = leftRoot;
+  };
+  const connectionByTerminal = new Map<string, number>();
+  const connectionByDeclaredNet = new Map<string, number>();
+  input.connections.forEach((connection, connectionIndex) => {
+    const declaredNet =
+      connection.netConnectionName ?? connection.rootConnectionName;
+    if (declaredNet) {
+      const prior = connectionByDeclaredNet.get(declaredNet);
+      if (prior === undefined)
+        connectionByDeclaredNet.set(declaredNet, connectionIndex);
+      else union(prior, connectionIndex);
+    }
+    for (const point of connection.pointsToConnect) {
+      const terminalKey =
+        point.pointId ?? nodeKey(point.layer, point.x, point.y);
+      const prior = connectionByTerminal.get(terminalKey);
+      if (prior === undefined)
+        connectionByTerminal.set(terminalKey, connectionIndex);
+      else union(prior, connectionIndex);
+    }
+  });
+  const groupNames = new Map<number, string[]>();
+  input.connections.forEach((connection, connectionIndex) => {
+    const root = find(connectionIndex);
+    const names = groupNames.get(root) ?? [];
+    names.push(
+      connection.netConnectionName ??
+        connection.rootConnectionName ??
+        connection.name,
+    );
+    groupNames.set(root, names);
+  });
+  const netIdByConnectionIndex = input.connections.map(
+    (_, connectionIndex) =>
+      [...new Set(groupNames.get(find(connectionIndex)) ?? [])].sort()[0]!,
+  );
+
   const demands: RouteDemand[] = [];
-  for (const connection of input.connections) {
+  for (const [connectionIndex, connection] of input.connections.entries()) {
     if (connection.pointsToConnect.length < 2) continue;
     const points = connection.pointsToConnect.map((point) => ({
       point,
@@ -240,10 +292,7 @@ const buildDemands = (
       demands.push({
         routeId: `${connection.name}:${branchIndex++}`,
         connectionName: connection.name,
-        netId:
-          connection.netConnectionName ??
-          connection.rootConnectionName ??
-          connection.name,
+        netId: netIdByConnectionIndex[connectionIndex]!,
         sourceNode: bestConnected.node!,
         targetNode: target.node!,
         sourcePointId: bestConnected.point.pointId,
@@ -330,8 +379,29 @@ export const generateBiscuitBoardHypergraph = (
   const xCoordinates = [input.bounds.minX, input.bounds.maxX];
   const yCoordinates = [input.bounds.minY, input.bounds.maxY];
 
+  // Wide free-space regions need more than one routing channel. A lightweight
+  // regular lattice provides parallel lanes while the obstacle-derived sweep
+  // lines retain exact corner and terminal geometry.
+  for (
+    let x = input.bounds.minX + options.gridPitch;
+    x < input.bounds.maxX;
+    x += options.gridPitch
+  ) {
+    xCoordinates.push(x);
+  }
+  for (
+    let y = input.bounds.minY + options.gridPitch;
+    y < input.bounds.maxY;
+    y += options.gridPitch
+  ) {
+    yCoordinates.push(y);
+  }
+
   for (const obstacle of input.obstacles) {
-    if (obstacle.isCopperPour) continue;
+    // A fixed via needs its center in the graph, but its circular pad does not
+    // need four additional global sweep lines. Those lines multiply the graph
+    // on via-dense prefabricated boards without exposing a new corridor.
+    if (obstacle.isCopperPour || obstacle.netIsAssignable) continue;
     const bounds = obstacleBounds(obstacle, margin);
     xCoordinates.push(bounds.minX, bounds.maxX);
     yCoordinates.push(bounds.minY, bounds.maxY);

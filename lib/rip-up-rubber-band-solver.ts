@@ -21,14 +21,18 @@ interface SearchNode {
 
 interface ActiveSearch {
   demand: RouteDemand;
+  allowBlockers: boolean;
   nodes: SearchNode[];
   open: MinHeap<number>;
   bestCostByState: Map<string, number>;
   expanded: number;
 }
 
-const stateKey = (graphNode: number, blockers: readonly string[]) =>
-  `${graphNode}|${blockers.join(",")}`;
+// Blocker sets are carried to the goal so the selected owners can be ripped,
+// but they are not part of the dominance key. Keeping every blocker subset is
+// exponential on a real board; one lowest-cost label per graph site is the
+// bounded approximation used by this negotiated router.
+const stateKey = (graphNode: number) => String(graphNode);
 
 const insertSortedUnique = (values: readonly string[], additions: string[]) =>
   [...new Set([...values, ...additions])].sort();
@@ -46,7 +50,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
 
   constructor(public readonly prepared: PreparedBiscuitRoutingProblem) {
     super();
-    this.pending = [...prepared.demands].sort((left, right) => {
+    const compareByDistance = (left: RouteDemand, right: RouteDemand) => {
       const leftDistance = pointDistance(
         prepared.nodes[left.sourceNode]!,
         prepared.nodes[left.targetNode]!,
@@ -55,11 +59,17 @@ export class RipUpRubberBandSolver extends BaseSolver {
         prepared.nodes[right.sourceNode]!,
         prepared.nodes[right.targetNode]!,
       );
-      return (
+      const comparison =
         rightDistance - leftDistance ||
-        left.routeId.localeCompare(right.routeId)
-      );
-    });
+        left.routeId.localeCompare(right.routeId);
+      return prepared.options.routeOrder === "shortest_first"
+        ? -comparison
+        : comparison;
+    };
+    this.pending =
+      prepared.options.routeOrder === "input"
+        ? [...prepared.demands]
+        : [...prepared.demands].sort(compareByDistance);
     const maximumRoutingAttempts =
       prepared.demands.length + prepared.options.maxTotalRips + 1;
     const stepsPerSearch = Math.ceil(
@@ -94,7 +104,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
         this.updateStats();
         return;
       }
-      this.activeSearch = this.createSearch(demand);
+      this.activeSearch = this.createSearch(demand, false);
     }
 
     for (
@@ -112,11 +122,15 @@ export class RipUpRubberBandSolver extends BaseSolver {
     this.updateStats();
   }
 
-  private createSearch(demand: RouteDemand): ActiveSearch {
+  private createSearch(
+    demand: RouteDemand,
+    allowBlockers: boolean,
+  ): ActiveSearch {
     const open = new MinHeap<number>();
     open.push(this.heuristic(demand.sourceNode, demand.targetNode), 0);
     return {
       demand,
+      allowBlockers,
       nodes: [
         {
           graphNode: demand.sourceNode,
@@ -127,7 +141,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
         },
       ],
       open,
-      bestCostByState: new Map([[stateKey(demand.sourceNode, []), 0]]),
+      bestCostByState: new Map([[stateKey(demand.sourceNode), 0]]),
       expanded: 0,
     };
   }
@@ -146,15 +160,21 @@ export class RipUpRubberBandSolver extends BaseSolver {
     if (!search) return;
     const searchNodeIndex = search.open.pop();
     if (searchNodeIndex === undefined) {
+      if (!search.allowBlockers) {
+        // Most routes have a free path, frequently by using the bottom layer
+        // through fixed vias. Searching that zero-blocker state space first
+        // avoids the combinatorial blocker subsets that tiny-hypergraph also
+        // treats as an exceptional rip/re-route phase.
+        this.activeSearch = this.createSearch(search.demand, true);
+        return;
+      }
       this.fail(
         `No fixed-via route found for "${search.demand.routeId}" with at most ${this.prepared.options.maxBlockersPerSearch} blockers`,
       );
       return;
     }
     const current = search.nodes[searchNodeIndex]!;
-    const bestCost = search.bestCostByState.get(
-      stateKey(current.graphNode, current.blockers),
-    );
+    const bestCost = search.bestCostByState.get(stateKey(current.graphNode));
     if (bestCost === undefined || current.g > bestCost + 1e-9) return;
     search.expanded++;
     this.totalExpandedStateCount++;
@@ -192,6 +212,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
     if (!this.edgeAllowsDemand(edge, search.demand)) return;
 
     const foreignOwners = this.getForeignOwners(edge, search.demand.netId);
+    if (!search.allowBlockers && foreignOwners.length > 0) return;
     for (const ownerRouteId of foreignOwners) {
       if (
         !this.committed.has(ownerRouteId) ||
@@ -211,7 +232,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
       (this.historyCostByEdge.get(edgeId) ?? 0) +
       foreignOwners.length * this.prepared.options.crossingCost +
       newlyAddedBlockers * this.prepared.options.ripCost;
-    const key = stateKey(toNode, nextBlockers);
+    const key = stateKey(toNode);
     if (
       nextG >= (search.bestCostByState.get(key) ?? Number.POSITIVE_INFINITY)
     ) {

@@ -15,8 +15,10 @@ The generator therefore derives coordinates from:
 
 It takes the Cartesian intersections of those coordinates on each copper
 layer and connects neighboring visible sites. This makes narrow corridors and
-obstacle corners explicit without rasterizing the entire board. Pad interiors
-remain net-restricted. Copper-pour obstacles are left to the pour stage.
+obstacle corners explicit. A coarse regular lattice adds parallel channels in
+wide free-space regions without rasterizing at trace-width resolution. Pad
+interiors remain net-restricted. Copper-pour obstacles are left to the pour
+stage.
 
 Every multi-layer obstacle with `netIsAssignable: true` gets one site per
 declared layer. Only those colocated sites receive cross-layer hyperedges. This
@@ -31,6 +33,10 @@ Tiny-hypergraph's angle-pair cache avoids repeatedly testing geometry inside a
 region. Here, the equivalent hot-loop optimization is a precomputed conflict
 list on each trace hyperedge. A* checks route owners through those lists rather
 than recomputing segment intersections for every candidate.
+
+Simple Route JSON may express one electrical net as several connections that
+share a terminal. The generator coalesces those connections before ownership
+checks, so branches may meet at that terminal without entering a rip loop.
 
 The package does not feed the raw Simple Route JSON directly into
 tiny-hypergraph because that would leave the hard and board-specific topology
