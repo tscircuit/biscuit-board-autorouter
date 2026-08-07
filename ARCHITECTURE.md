@@ -22,7 +22,9 @@ stage.
 
 Every multi-layer obstacle with `netIsAssignable: true` gets one site per
 declared layer. Only those colocated sites receive cross-layer hyperedges. This
-is the primary no-new-vias guarantee.
+is the primary no-new-vias guarantee. Layer transitions carry a deliberately
+high soft cost, so the router uses a prefabricated via only when it materially
+improves or enables the route.
 
 ## Relationship to tiny-hypergraph
 

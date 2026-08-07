@@ -33,7 +33,7 @@ const DEFAULT_OPTIONS: NormalizedBiscuitBoardAutorouterOptions = {
   gridPitch: 1.5,
   gridClearance: 0.2,
   chamferDistance: 0.5,
-  viaTransitionCost: 2,
+  viaTransitionCost: 20,
   ripCost: 10,
   crossingCost: 0.25,
   historyIncrement: 4,
