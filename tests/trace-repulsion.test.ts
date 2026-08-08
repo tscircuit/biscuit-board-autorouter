@@ -67,11 +67,14 @@ test("moving a via pushes its trace leg around foreign copper", () => {
       { route_type: "wire" }
     > => point.route_type === "wire" && point.layer === "top",
   );
-  const via = output.traces[0]!.route.find(
-    (point) => point.route_type === "via",
+  const existingCopperTransition = output.traces[0]!.route.find(
+    (point) => point.route_type === "through_obstacle",
   )!;
 
-  expect(via).toMatchObject({ x: 5, y: 5 });
+  expect(existingCopperTransition).toMatchObject({
+    start: { x: 5, y: 5 },
+    end: { x: 5, y: 5 },
+  });
   expect(movingWires.length).toBeGreaterThan(2);
   expect(output.stats.repelledTraceLegCount).toBeGreaterThan(0);
   for (let index = 1; index < movingWires.length; index += 1) {

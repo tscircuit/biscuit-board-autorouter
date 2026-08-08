@@ -12,7 +12,7 @@ const pointKey = (point: { x: number; y: number }): string =>
   `${point.x.toFixed(3)},${point.y.toFixed(3)}`;
 
 describe("Pipeline7 prefabricated-via post-processing", () => {
-  test("moves Pipeline7's manufacturing via to the prefabricated via", () => {
+  test("moves Pipeline7's via and emits an existing-copper transition", () => {
     const pipeline7 = new Pipeline7Solver({
       input: forcedPrefabricatedViaFixture,
       options: { effort: 0.1 },
@@ -33,8 +33,19 @@ describe("Pipeline7 prefabricated-via post-processing", () => {
     const routedVias = traces.flatMap((trace) =>
       trace.route.filter((point) => point.route_type === "via"),
     );
+    const existingCopperTransitions = traces.flatMap((trace) =>
+      trace.route.filter((point) => point.route_type === "through_obstacle"),
+    );
 
-    expect(routedVias.map(pointKey)).toEqual([pointKey({ x: 0, y: 4 })]);
+    expect(routedVias).toEqual([]);
+    expect(existingCopperTransitions).toEqual([
+      expect.objectContaining({
+        start: { x: 0, y: 4 },
+        end: { x: 0, y: 4 },
+        from_layer: "top",
+        to_layer: "bottom",
+      }),
+    ]);
     expect(autorouter.solver.getOutput()!.stats).toMatchObject({
       inputViaCount: 1,
       movedViaCount: 1,
@@ -52,7 +63,7 @@ describe("Pipeline7 prefabricated-via post-processing", () => {
       pipeline7: { effort: 0.1 },
     });
 
-    expect(() => solver.solve()).toThrow("compatible prefabricated vias");
+    expect(() => solver.solve()).toThrow("compatible prefabricated via");
   });
 
   test("matches the complete Pipeline7 plus attraction debugger SVG", async () => {

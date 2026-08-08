@@ -12,23 +12,60 @@ export interface Pipeline7SolverParams {
   options?: Pipeline7Options;
 }
 
+const makePrefabricatedViasHardObstacles = (
+  input: SimpleRouteJson,
+): SimpleRouteJson => ({
+  ...input,
+  obstacles: input.obstacles.map((obstacle) =>
+    obstacle.netIsAssignable
+      ? { ...obstacle, connectedTo: [], netIsAssignable: false }
+      : obstacle,
+  ),
+});
+
 /** Makes Pipeline7 a standard solver-utils stage without hiding its debugger. */
 export class Pipeline7Solver extends BaseSolver {
   readonly pipeline7: AutoroutingPipelineSolver7_MultiGraph;
 
-  constructor({ input, options = {} }: Pipeline7SolverParams) {
+  constructor(public readonly params: Pipeline7SolverParams) {
     super();
-    this.pipeline7 = new AutoroutingPipelineSolver7_MultiGraph(input, {
-      ...options,
-      cacheProvider: null,
-    });
+    const { input, options = {} } = params;
+    const { viaTransitionCost = 25, ...pipeline7Options } = options;
+    this.pipeline7 = new AutoroutingPipelineSolver7_MultiGraph(
+      makePrefabricatedViasHardObstacles(input),
+      {
+        ...pipeline7Options,
+        cacheProvider: null,
+      },
+    );
+    const portPathingStep = this.pipeline7.pipelineDef.find(
+      (step) => step.solverName === "portPointPathingSolver",
+    );
+    if (!portPathingStep) {
+      throw new Error("Pipeline7 port-point pathing stage is missing");
+    }
+    const getOriginalConstructorParams = portPathingStep.getConstructorParams;
+    portPathingStep.getConstructorParams = (pipeline) => {
+      const params = getOriginalConstructorParams(pipeline);
+      const config = params[0] as {
+        weights: { LAYER_CHANGE_COST: number; [key: string]: number };
+        [key: string]: unknown;
+      };
+      return [
+        {
+          ...config,
+          weights: {
+            ...config.weights,
+            LAYER_CHANGE_COST: viaTransitionCost,
+          },
+        },
+      ] as typeof params;
+    };
     this.MAX_ITERATIONS = this.pipeline7.MAX_ITERATIONS + 1;
   }
 
   override getConstructorParams(): [Pipeline7SolverParams] {
-    return [
-      { input: this.pipeline7.originalSrj, options: this.pipeline7.opts },
-    ];
+    return [this.params];
   }
 
   override _step(): void {
