@@ -26,7 +26,8 @@ The exported `BiscuitBoardAutorouter` implements tscircuit's
 
 1. `Pipeline7Solver` runs `AutoroutingPipelineSolver7_MultiGraph` from
    [`@tscircuit/capacity-autorouter`](https://github.com/tscircuit/tscircuit-autorouter),
-   with prefab vias kept as hard obstacles during the global solve.
+   with a 0.2 mm minimum obstacle clearance and prefab vias kept as hard
+   obstacles during the global solve.
 2. `PrefabricatedViaPostprocessingSolver` assigns every Pipeline7 via to an
    unused, compatible, reachable Simple Route JSON obstacle marked
    `netIsAssignable`.

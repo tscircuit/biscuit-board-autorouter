@@ -22,6 +22,8 @@ export interface Pipeline7Options {
   maxNodeDimension?: number;
   maxNodeRatio?: number;
   minNodeArea?: number;
+  /** Minimum edge-to-edge obstacle clearance used by Pipeline7. */
+  clearance?: number;
   /** Pipeline7 port-pathing cost for an avoidable layer transition. */
   viaTransitionCost?: number;
 }

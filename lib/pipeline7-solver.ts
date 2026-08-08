@@ -14,8 +14,10 @@ export interface Pipeline7SolverParams {
 
 const makePrefabricatedViasHardObstacles = (
   input: SimpleRouteJson,
+  clearance: number,
 ): SimpleRouteJson => ({
   ...input,
+  defaultObstacleMargin: Math.max(input.defaultObstacleMargin ?? 0, clearance),
   obstacles: input.obstacles.map((obstacle) =>
     obstacle.netIsAssignable
       ? { ...obstacle, connectedTo: [], netIsAssignable: false }
@@ -30,9 +32,13 @@ export class Pipeline7Solver extends BaseSolver {
   constructor(public readonly params: Pipeline7SolverParams) {
     super();
     const { input, options = {} } = params;
-    const { viaTransitionCost = 25, ...pipeline7Options } = options;
+    const {
+      clearance = 0.2,
+      viaTransitionCost = 25,
+      ...pipeline7Options
+    } = options;
     this.pipeline7 = new AutoroutingPipelineSolver7_MultiGraph(
-      makePrefabricatedViasHardObstacles(input),
+      makePrefabricatedViasHardObstacles(input, clearance),
       {
         ...pipeline7Options,
         cacheProvider: null,

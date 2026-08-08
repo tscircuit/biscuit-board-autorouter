@@ -1146,8 +1146,7 @@ export class PrefabricatedViaPostprocessingSolver extends BaseSolver {
     const usedTargetObstacleIndexes = new Set<number>();
     const clearance =
       this.params.options?.clearance ??
-      this.params.input.defaultObstacleMargin ??
-      0.15;
+      Math.max(this.params.input.defaultObstacleMargin ?? 0, 0.2);
     const searchMargin = this.params.options?.detourSearchMargin ?? 4;
     let repelledTraceLegCount = 0;
 
