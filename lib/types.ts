@@ -80,6 +80,7 @@ export interface RoutingAdjacency {
 export interface RouteDemand {
   routeId: string;
   connectionName: string;
+  allowedConnectionNames?: string[];
   netId: string;
   sourceNode: number;
   targetNode: number;
@@ -127,6 +128,8 @@ export interface BiscuitBoardRoutingStats {
   fixedViaTransitionCount: number;
   graphNodeCount: number;
   graphEdgeCount: number;
+  negotiationPassCount?: number;
+  conflictRouteCount?: number;
   postProcessedClearance?: number;
   preSimplificationSegmentCount?: number;
   postSimplificationSegmentCount?: number;

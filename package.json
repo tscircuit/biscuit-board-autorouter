@@ -21,6 +21,7 @@
     }
   },
   "scripts": {
+    "benchmark": "./benchmark.sh",
     "build": "bunx tsc --noEmit",
     "build:site": "cosmos-export",
     "dev": "cosmos",

@@ -64,12 +64,12 @@ const routeToTrace = (
         );
       }
       outputRoute.push({
-        route_type: "via",
-        x: via.x,
-        y: via.y,
+        route_type: "through_obstacle",
+        start: { x: via.x, y: via.y },
+        end: { x: via.x, y: via.y },
         from_layer: previous.layer,
         to_layer: node.layer,
-        via_diameter: Math.min(via.width, via.height),
+        width: demand.width,
       });
     }
     outputRoute.push({
@@ -104,16 +104,22 @@ export const assertOnlyPrefabricatedVias = (
 ) => {
   for (const trace of traces) {
     for (const routePoint of trace.route) {
-      if (routePoint.route_type !== "via") continue;
+      if (routePoint.route_type === "via") {
+        throw new Error(
+          `Trace "${trace.pcb_trace_id}" contains a manufactured via at (${routePoint.x}, ${routePoint.y})`,
+        );
+      }
+      if (routePoint.route_type !== "through_obstacle") continue;
       const matchingVia = prepared.prefabricatedVias.find(
         (via) =>
-          pointsEqual(via, routePoint) &&
+          pointsEqual(via, routePoint.start) &&
+          pointsEqual(via, routePoint.end) &&
           via.layers.includes(routePoint.from_layer) &&
           via.layers.includes(routePoint.to_layer),
       );
       if (!matchingVia) {
         throw new Error(
-          `Trace "${trace.pcb_trace_id}" contains a non-prefabricated via at (${routePoint.x}, ${routePoint.y})`,
+          `Trace "${trace.pcb_trace_id}" traverses a non-prefabricated obstacle at (${routePoint.start.x}, ${routePoint.start.y})`,
         );
       }
     }
