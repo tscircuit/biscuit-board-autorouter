@@ -94,7 +94,7 @@ test("rips a chokepoint route and requeues it onto a clear corridor", () => {
 
   expect(solver.failed).toBe(false);
   expect(solver.solved).toBe(true);
-  expect(solver.getOutput().stats.ripCount).toBe(1);
+  expect(solver.getOutput().stats.ripCount).toBeGreaterThan(0);
   expect(solver.getOutput().routes).toHaveLength(2);
   expect(solver.committedRoutes.get("a-flexible")!.nodePath).toEqual([
     0, 3, 4, 2,

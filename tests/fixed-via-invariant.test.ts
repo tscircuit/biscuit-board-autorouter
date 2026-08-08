@@ -39,10 +39,12 @@ describe("fixed-via invariant", () => {
     );
     const traces = autorouter.solveSync();
     const routedVias = traces.flatMap((trace) =>
-      trace.route.filter((point) => point.route_type === "via"),
+      trace.route.filter((point) => point.route_type === "through_obstacle"),
     );
 
-    expect(routedVias.map(pointKey)).toEqual([pointKey({ x: 0, y: 4 })]);
+    expect(routedVias.map((point) => pointKey(point.start))).toEqual([
+      pointKey({ x: 0, y: 4 }),
+    ]);
     expect(autorouter.solver.getOutput()!.stats.fixedViaTransitionCount).toBe(
       1,
     );
@@ -63,6 +65,23 @@ describe("fixed-via invariant", () => {
     expect(solver.solved).toBe(false);
     expect(solver.failed).toBe(true);
     expect(solver.error).toContain("No fixed-via route found");
+  });
+
+  test("does not mistake an assignable plated hole for a prefabricated via", () => {
+    const input = {
+      ...forcedPrefabricatedViaFixture,
+      obstacles: forcedPrefabricatedViaFixture.obstacles.map((obstacle) =>
+        obstacle.netIsAssignable
+          ? { ...obstacle, connectedTo: ["pcb_plated_hole_usb_shell"] }
+          : obstacle,
+      ),
+    };
+    const prepared = generateBiscuitBoardHypergraph(input);
+
+    expect(prepared.prefabricatedVias).toEqual([]);
+    expect(
+      prepared.edges.filter((edge) => edge.kind === "fixed_via_transition"),
+    ).toEqual([]);
   });
 
   test("matches the routing-debug SVG", async () => {

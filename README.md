@@ -53,6 +53,7 @@ bun run dev
 bun run build
 bun run test
 bun run format:check
+./benchmark.sh --debug
 ```
 
 Cosmos exposes the generated hypergraph and every live pipeline stage through
@@ -62,7 +63,8 @@ Cosmos exposes the generated hypergraph and every live pipeline stage through
   one solver behavior.
 - `repros/reproXX.page.tsx` contains exact, checked-in autorouter inputs
   captured from real projects. Repro 01 is the complete BiscuitBoard
-  STM32C071FBP6 routing problem.
+  STM32C071FBP6 routing problem; Repro 02 is the complete RP2040 board and is
+  also the input to `benchmark.sh`.
 
 Tests include SVG matching, forced layer transitions, the
 no-prefabricated-via failure case, negotiated rip-and-replace, and the complete

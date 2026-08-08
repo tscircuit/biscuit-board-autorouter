@@ -1,4 +1,4 @@
-import type { SimplifiedPcbTrace } from "@tscircuit/core";
+import type { SimpleRouteJson, SimplifiedPcbTrace } from "@tscircuit/core";
 import { BaseSolver } from "@tscircuit/solver-utils";
 import type { GraphicsObject } from "graphics-debug";
 import {
@@ -29,6 +29,20 @@ interface TraceSegment {
   start: WirePoint;
   end: WirePoint;
 }
+
+const obstacleHasPcbViaId = (obstacle: SimpleRouteJson["obstacles"][number]) =>
+  obstacle.connectedTo.some((id) => id.startsWith("pcb_via"));
+
+const traceTraversesObstacle = (
+  trace: SimplifiedPcbTrace,
+  obstacle: SimpleRouteJson["obstacles"][number],
+) =>
+  trace.route.some(
+    (point) =>
+      point.route_type === "through_obstacle" &&
+      pointsEqual(point.start, obstacle.center) &&
+      pointsEqual(point.end, obstacle.center),
+  );
 
 export interface TraceClearanceViolation {
   kind: "obstacle" | "trace";
@@ -100,10 +114,8 @@ const obstacleAllowsSegment = (
   }
   return (
     obstacle.netIsAssignable === true &&
-    context.trace.route.some(
-      (point) =>
-        point.route_type === "via" && pointsEqual(point, obstacle.center),
-    ) &&
+    obstacleHasPcbViaId(obstacle) &&
+    traceTraversesObstacle(context.trace, obstacle) &&
     (pointsEqual(segment.start, obstacle.center) ||
       pointsEqual(segment.end, obstacle.center))
   );
@@ -251,7 +263,10 @@ const createSegmentClearanceChecker = (
 // Adapted from tscircuit-autorouter's calculate45DegreePaths utility. Each
 // candidate contains at most one bend and uses only 0, 45, or 90 degree axes.
 const calculate45DegreePaths = (start: Point, end: Point): Point[][] => {
-  const paths: Point[][] = [];
+  const paths: Point[][] = [
+    [start, { x: end.x, y: start.y }, end],
+    [start, { x: start.x, y: end.y }, end],
+  ];
   const dx = Math.abs(end.x - start.x);
   const dy = Math.abs(end.y - start.y);
   const signX = end.x > start.x ? 1 : -1;
@@ -414,17 +429,42 @@ export const postProcessBiscuitBoardTraces = (
     (count, trace) => count + getSegments(trace).length,
     0,
   );
-  for (let traceIndex = 0; traceIndex < traces.length; traceIndex++) {
-    const segmentHasClearance = createSegmentClearanceChecker(
-      prepared,
-      { ...solution, traces },
-      traceIndex,
-      clearance,
+  for (let pass = 0; pass < 3; pass++) {
+    const segmentCountBeforePass = traces.reduce(
+      (count, trace) => count + getSegments(trace).length,
+      0,
     );
-    traces[traceIndex] = {
-      ...traces[traceIndex]!,
-      route: simplifyTraceRoute(traces[traceIndex]!.route, segmentHasClearance),
-    };
+    const traceIndexes = traces
+      .map((trace, traceIndex) => ({
+        traceIndex,
+        segmentCount: getSegments(trace).length,
+      }))
+      .sort(
+        (left, right) =>
+          right.segmentCount - left.segmentCount ||
+          left.traceIndex - right.traceIndex,
+      )
+      .map(({ traceIndex }) => traceIndex);
+    for (const traceIndex of traceIndexes) {
+      const segmentHasClearance = createSegmentClearanceChecker(
+        prepared,
+        { ...solution, traces },
+        traceIndex,
+        clearance,
+      );
+      traces[traceIndex] = {
+        ...traces[traceIndex]!,
+        route: simplifyTraceRoute(
+          traces[traceIndex]!.route,
+          segmentHasClearance,
+        ),
+      };
+    }
+    const segmentCountAfterPass = traces.reduce(
+      (count, trace) => count + getSegments(trace).length,
+      0,
+    );
+    if (segmentCountAfterPass >= segmentCountBeforePass) break;
   }
   const postSimplificationSegmentCount = traces.reduce(
     (count, trace) => count + getSegments(trace).length,
@@ -475,7 +515,9 @@ const visualizeTraces = (
       obstacle.componentId ??
       obstacle.obstacleId ??
       `obstacle-${obstacleIndex}`;
-    const label = obstacle.netIsAssignable
+    const isPrefabricatedVia =
+      obstacle.netIsAssignable && obstacleHasPcbViaId(obstacle);
+    const label = isPrefabricatedVia
       ? `prefabricated via · ${identifier}`
       : `pad/obstacle · ${identifier}`;
     const envelope = obstacleBounds(obstacle, maximumTraceRadius + clearance);
@@ -486,10 +528,10 @@ const visualizeTraces = (
       },
       width: envelope.maxX - envelope.minX,
       height: envelope.maxY - envelope.minY,
-      fill: obstacle.netIsAssignable
+      fill: isPrefabricatedVia
         ? "rgba(14,165,233,0.06)"
         : "rgba(239,68,68,0.045)",
-      stroke: obstacle.netIsAssignable
+      stroke: isPrefabricatedVia
         ? "rgba(2,132,199,0.24)"
         : "rgba(220,38,38,0.16)",
       label: `${label} · ${clearance}mm clearance envelope`,
@@ -498,10 +540,10 @@ const visualizeTraces = (
       circles.push({
         center: obstacle.center,
         radius: Math.max(obstacle.width, obstacle.height) / 2,
-        fill: obstacle.netIsAssignable
+        fill: isPrefabricatedVia
           ? "rgba(14,165,233,0.42)"
           : "rgba(168,85,247,0.35)",
-        stroke: obstacle.netIsAssignable ? "#0284c7" : "#7e22ce",
+        stroke: isPrefabricatedVia ? "#0284c7" : "#7e22ce",
         label,
       });
     } else {
@@ -545,11 +587,11 @@ const visualizeTraces = (
     lines: [...originalLines, ...simplifiedLines],
     points: solution.traces.flatMap((trace) =>
       trace.route.flatMap((point) =>
-        point.route_type === "via"
+        point.route_type === "through_obstacle"
           ? [
               {
-                x: point.x,
-                y: point.y,
+                x: point.start.x,
+                y: point.start.y,
                 color: "#0369a1",
                 label: "used prefabricated via",
               },

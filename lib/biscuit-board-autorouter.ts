@@ -112,6 +112,7 @@ export const createBiscuitBoardAutorouter = (
 ): AutorouterConfig => ({
   local: true,
   groupMode: "subcircuit",
+  preset: "laser_prefab",
   algorithmFn: async (input: SimpleRouteJson) =>
     new BiscuitBoardAutorouter(input, options),
 });

@@ -29,7 +29,9 @@ test("solves the exact BiscuitBoard STM32C071 real-project input", () => {
   expect(solver.solved).toBe(true);
   const output = solver.getOutput();
   expect(output).not.toBeNull();
-  expect(output!.traces).toHaveLength(17);
+  // The 17 original branch demands need two additional same-net Steiner
+  // bridges after rip-and-replace to keep every terminal component connected.
+  expect(output!.traces).toHaveLength(19);
   expect(output!.stats.postProcessedClearance).toBe(0.2);
   expect(output!.stats.preSimplificationSegmentCount).toBeGreaterThan(0);
   expect(output!.stats.postSimplificationSegmentCount).toBeLessThan(
@@ -44,8 +46,8 @@ test("solves the exact BiscuitBoard STM32C071 real-project input", () => {
   expect(
     output!.traces
       .flatMap((trace) => trace.route)
-      .filter((point) => point.route_type === "via")
-      .every((via) => assignableViaPositions.has(pointKey(via))),
+      .filter((point) => point.route_type === "through_obstacle")
+      .every((via) => assignableViaPositions.has(pointKey(via.start))),
   ).toBe(true);
   for (const trace of output!.traces) {
     for (let index = 1; index < trace.route.length; index++) {

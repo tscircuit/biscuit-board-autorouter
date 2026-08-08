@@ -16,3 +16,20 @@ they must not be reduced or reconstructed.
 
 The checked-in `.srj.json` file is the exact captured value, including source
 IDs and connectivity metadata.
+
+## Repro 02 · BiscuitBoard RP2040
+
+- Source: `tscircuit/biscuit-boards` RP2040 example
+- Circuit: the complete `RP2040` design from `@tscircuit/common`
+- Capture point: the `SimpleRouteJson` passed to `BiscuitBoard`'s
+  `autorouter.algorithmFn`
+- Input: 35 connections, 215 obstacles, 2 layers, 97 routing demands, and 54
+  assignable prefabricated vias
+
+Open `repros/repro02.page.tsx` in Cosmos for the `GenericSolverDebugger`, or
+run `./benchmark.sh` for the headless regression benchmark. The benchmark
+exits successfully only when every original demand is electrically connected,
+all emitted traces route with no manufactured vias, and no clearance
+violations remain. It currently exits nonzero because negotiated routing still
+cycles on this dense board; use `--debug` to include its conflict and
+connectivity state in the JSON report.

@@ -29,7 +29,7 @@ const nodeKey = (layer: string, x: number, y: number) =>
   `${layer}:${coordinateKey(x)}:${coordinateKey(y)}`;
 
 const DEFAULT_OPTIONS: NormalizedBiscuitBoardAutorouterOptions = {
-  routeOrder: "longest_first",
+  routeOrder: "input",
   gridPitch: 1.5,
   gridClearance: 0.2,
   viaTransitionCost: 20,
@@ -102,14 +102,13 @@ const getLayers = (input: SimpleRouteJson) => {
 const getPrefabricatedVias = (input: SimpleRouteJson): PrefabricatedVia[] =>
   input.obstacles.flatMap((obstacle, obstacleIndex) => {
     const layers = [...new Set(obstacle.layers)];
-    if (!obstacle.netIsAssignable || layers.length < 2) return [];
+    const pcbViaId = obstacle.connectedTo.find((id) =>
+      id.startsWith("pcb_via"),
+    );
+    if (!obstacle.netIsAssignable || !pcbViaId || layers.length < 2) return [];
     return [
       {
-        prefabViaId:
-          obstacle.obstacleId ??
-          obstacle.componentId ??
-          obstacle.connectedTo.find((id) => id.startsWith("pcb_via")) ??
-          `prefabricated-via-${obstacleIndex}`,
+        prefabViaId: pcbViaId,
         obstacleIndex,
         x: obstacle.center.x,
         y: obstacle.center.y,
@@ -247,6 +246,7 @@ const buildDemands = (
     }
   });
   const groupNames = new Map<number, string[]>();
+  const groupConnectionNames = new Map<number, string[]>();
   input.connections.forEach((connection, connectionIndex) => {
     const root = find(connectionIndex);
     const names = groupNames.get(root) ?? [];
@@ -256,6 +256,9 @@ const buildDemands = (
         connection.name,
     );
     groupNames.set(root, names);
+    const connectionNames = groupConnectionNames.get(root) ?? [];
+    connectionNames.push(connection.name);
+    groupConnectionNames.set(root, connectionNames);
   });
   const netIdByConnectionIndex = input.connections.map(
     (_, connectionIndex) =>
@@ -299,6 +302,9 @@ const buildDemands = (
       demands.push({
         routeId: `${connection.name}:${branchIndex++}`,
         connectionName: connection.name,
+        allowedConnectionNames: [
+          ...new Set(groupConnectionNames.get(find(connectionIndex)) ?? []),
+        ],
         netId: netIdByConnectionIndex[connectionIndex]!,
         sourceNode: bestConnected.node!,
         targetNode: target.node!,
@@ -327,7 +333,8 @@ const addConflictPairs = (
   );
   const bucketSize = 2;
   const buckets = new Map<string, number[]>();
-  const compared = new Set<string>();
+  const getBucketKey = (layer: string, x: number, y: number) =>
+    `${layer}:${x}:${y}`;
   for (const edge of traceEdges) {
     const from = nodes[edge.fromNode]!;
     const to = nodes[edge.toNode]!;
@@ -346,15 +353,13 @@ const addConflictPairs = (
     const candidateIds = new Set<number>();
     for (let x = minBucketX; x <= maxBucketX; x++) {
       for (let y = minBucketY; y <= maxBucketY; y++) {
-        for (const candidate of buckets.get(`${x}:${y}`) ?? []) {
+        for (const candidate of buckets.get(getBucketKey(from.layer, x, y)) ??
+          []) {
           candidateIds.add(candidate);
         }
       }
     }
     for (const candidateId of candidateIds) {
-      const pairKey = `${candidateId}:${edge.edgeId}`;
-      if (compared.has(pairKey)) continue;
-      compared.add(pairKey);
       const candidate = edges[candidateId] as Extract<
         RoutingEdge,
         { kind: "trace" }
@@ -372,7 +377,7 @@ const addConflictPairs = (
     }
     for (let x = minBucketX; x <= maxBucketX; x++) {
       for (let y = minBucketY; y <= maxBucketY; y++) {
-        const key = `${x}:${y}`;
+        const key = getBucketKey(from.layer, x, y);
         const values = buckets.get(key) ?? [];
         values.push(edge.edgeId);
         buckets.set(key, values);
@@ -407,14 +412,14 @@ export const generateBiscuitBoardHypergraph = (
     options.gridClearance,
     input.minTraceToPadEdgeClearance ?? 0,
   );
-  const margin = maximumTraceWidth / 2 + effectiveClearance;
+  const maximumTraceMargin = maximumTraceWidth / 2 + effectiveClearance;
   const boardEdgeMargin =
     (input.minBoardEdgeClearance ?? 0) + input.minTraceWidth / 2;
-  const xCoordinates = [
+  const baseXCoordinates = [
     input.bounds.minX + boardEdgeMargin,
     input.bounds.maxX - boardEdgeMargin,
   ];
-  const yCoordinates = [
+  const baseYCoordinates = [
     input.bounds.minY + boardEdgeMargin,
     input.bounds.maxY - boardEdgeMargin,
   ];
@@ -427,103 +432,168 @@ export const generateBiscuitBoardHypergraph = (
     x < input.bounds.maxX - boardEdgeMargin;
     x += options.gridPitch
   ) {
-    xCoordinates.push(x);
+    baseXCoordinates.push(x);
   }
   for (
     let y = input.bounds.minY + boardEdgeMargin + options.gridPitch;
     y < input.bounds.maxY - boardEdgeMargin;
     y += options.gridPitch
   ) {
-    yCoordinates.push(y);
+    baseYCoordinates.push(y);
   }
 
+  const verticalSweepCoordinates: number[] = [];
+  const horizontalSweepCoordinates: number[] = [];
+  const specialPoints: Point[] = [];
   for (const obstacle of input.obstacles) {
-    // A fixed via needs its center in the graph, but its circular pad does not
-    // need four additional global sweep lines. Those lines multiply the graph
-    // on via-dense prefabricated boards without exposing a new corridor.
     if (obstacle.isCopperPour || obstacle.netIsAssignable) continue;
-    const bounds = obstacleBounds(obstacle, margin);
-    xCoordinates.push(bounds.minX, bounds.maxX);
-    yCoordinates.push(bounds.minY, bounds.maxY);
+    const bounds = obstacleBounds(obstacle, maximumTraceMargin);
+    verticalSweepCoordinates.push(bounds.minX, bounds.maxX);
+    horizontalSweepCoordinates.push(bounds.minY, bounds.maxY);
+    specialPoints.push(
+      { x: bounds.minX, y: bounds.minY },
+      { x: bounds.minX, y: bounds.maxY },
+      { x: bounds.maxX, y: bounds.minY },
+      { x: bounds.maxX, y: bounds.maxY },
+    );
   }
   for (const connection of input.connections) {
     for (const point of connection.pointsToConnect) {
-      xCoordinates.push(point.x);
-      yCoordinates.push(point.y);
+      verticalSweepCoordinates.push(point.x);
+      horizontalSweepCoordinates.push(point.y);
+      specialPoints.push(point);
+      const terminalIdentifiers = [
+        connection.name,
+        connection.netConnectionName,
+        connection.rootConnectionName,
+        point.pointId,
+      ].filter((identifier): identifier is string => Boolean(identifier));
+      for (const obstacle of input.obstacles) {
+        if (
+          obstacle.isCopperPour ||
+          !terminalIdentifiers.some((identifier) =>
+            obstacle.connectedTo.includes(identifier),
+          )
+        ) {
+          continue;
+        }
+        const bounds = obstacleBounds(obstacle, maximumTraceMargin);
+        const escapePoints = [
+          { x: bounds.minX, y: point.y },
+          { x: bounds.maxX, y: point.y },
+          { x: point.x, y: bounds.minY },
+          { x: point.x, y: bounds.maxY },
+        ];
+        specialPoints.push(...escapePoints);
+      }
     }
   }
   for (const via of prefabricatedVias) {
-    xCoordinates.push(via.x);
-    yCoordinates.push(via.y);
+    verticalSweepCoordinates.push(via.x);
+    horizontalSweepCoordinates.push(via.y);
+    specialPoints.push(via);
   }
-  const xs = uniqueSorted(
-    xCoordinates.filter(
+  const baseXs = uniqueSorted(
+    baseXCoordinates.filter(
       (value) => value >= input.bounds.minX && value <= input.bounds.maxX,
     ),
   );
-  const ys = uniqueSorted(
-    yCoordinates.filter(
+  const baseYs = uniqueSorted(
+    baseYCoordinates.filter(
       (value) => value >= input.bounds.minY && value <= input.bounds.maxY,
     ),
   );
+  const verticalXs = uniqueSorted(
+    verticalSweepCoordinates.filter(
+      (value) => value >= input.bounds.minX && value <= input.bounds.maxX,
+    ),
+  );
+  const horizontalYs = uniqueSorted(
+    horizontalSweepCoordinates.filter(
+      (value) => value >= input.bounds.minY && value <= input.bounds.maxY,
+    ),
+  );
+
+  // Build a sparse orthogonal visibility lattice. Feature sweep lines cross
+  // the regular grid, but do not cross every other feature sweep line. Only
+  // real feature corners and electrical points are inserted at those
+  // intersections. This preserves terminal escapes and obstacle turns without
+  // the obstacleCount² Cartesian product that dominated the RP2040 repro.
+  const coordinatePairs = new Map<string, Point>();
+  const addCoordinatePair = (x: number, y: number) => {
+    const point = { x: roundCoordinate(x), y: roundCoordinate(y) };
+    coordinatePairs.set(
+      `${coordinateKey(point.x)}:${coordinateKey(point.y)}`,
+      point,
+    );
+  };
+  for (const x of baseXs) {
+    for (const y of baseYs) addCoordinatePair(x, y);
+  }
+  for (const x of verticalXs) {
+    for (const y of baseYs) addCoordinatePair(x, y);
+  }
+  for (const x of baseXs) {
+    for (const y of horizontalYs) addCoordinatePair(x, y);
+  }
+  for (const point of specialPoints) addCoordinatePair(point.x, point.y);
+  const graphPoints = [...coordinatePairs.values()];
 
   const nodes: RoutingNode[] = [];
   const nodeIndexByKey = new Map<string, number>();
   const rowNodes = new Map<string, number[]>();
   const columnNodes = new Map<string, number[]>();
   for (const layer of layers) {
-    for (const x of xs) {
-      for (const y of ys) {
-        const point = { x, y };
-        const special = getSpecialNodeMetadata(
+    for (const point of graphPoints) {
+      const { x, y } = point;
+      const special = getSpecialNodeMetadata(
+        input,
+        prefabricatedVias,
+        layer,
+        point,
+      );
+      if (
+        !isInsideBounds(
           input,
-          prefabricatedVias,
-          layer,
           point,
-        );
-        if (
-          !isInsideBounds(
-            input,
-            point,
-            boardEdgeMargin,
-            special.terminalConnectionNames.length > 0 ||
-              Boolean(special.prefabVia),
-          )
-        ) {
-          continue;
-        }
-        if (
-          nodeIsBlocked(input, layer, point, margin, special) &&
-          special.terminalConnectionNames.length === 0 &&
-          !special.prefabVia
-        ) {
-          continue;
-        }
-        const kind = special.prefabVia
-          ? "fixed_via"
-          : special.terminalConnectionNames.length > 0
-            ? "terminal"
-            : "grid";
-        const nodeIndex = nodes.length;
-        nodes.push({
-          nodeId: `${kind}:${nodeKey(layer, x, y)}`,
-          x,
-          y,
-          layer,
-          kind,
-          terminalPointIds: special.terminalPointIds,
-          terminalConnectionNames: special.terminalConnectionNames,
-          prefabViaId: special.prefabVia?.prefabViaId,
-        });
-        nodeIndexByKey.set(nodeKey(layer, x, y), nodeIndex);
-        const rowKey = `${layer}:${coordinateKey(y)}`;
-        const columnKey = `${layer}:${coordinateKey(x)}`;
-        rowNodes.set(rowKey, [...(rowNodes.get(rowKey) ?? []), nodeIndex]);
-        columnNodes.set(columnKey, [
-          ...(columnNodes.get(columnKey) ?? []),
-          nodeIndex,
-        ]);
+          boardEdgeMargin,
+          special.terminalConnectionNames.length > 0 ||
+            Boolean(special.prefabVia),
+        )
+      ) {
+        continue;
       }
+      if (
+        nodeIsBlocked(input, layer, point, maximumTraceMargin, special) &&
+        special.terminalConnectionNames.length === 0 &&
+        !special.prefabVia
+      ) {
+        continue;
+      }
+      const kind = special.prefabVia
+        ? "fixed_via"
+        : special.terminalConnectionNames.length > 0
+          ? "terminal"
+          : "grid";
+      const nodeIndex = nodes.length;
+      nodes.push({
+        nodeId: `${kind}:${nodeKey(layer, x, y)}`,
+        x,
+        y,
+        layer,
+        kind,
+        terminalPointIds: special.terminalPointIds,
+        terminalConnectionNames: special.terminalConnectionNames,
+        prefabViaId: special.prefabVia?.prefabViaId,
+      });
+      nodeIndexByKey.set(nodeKey(layer, x, y), nodeIndex);
+      const rowKey = `${layer}:${coordinateKey(y)}`;
+      const columnKey = `${layer}:${coordinateKey(x)}`;
+      rowNodes.set(rowKey, [...(rowNodes.get(rowKey) ?? []), nodeIndex]);
+      columnNodes.set(columnKey, [
+        ...(columnNodes.get(columnKey) ?? []),
+        nodeIndex,
+      ]);
     }
   }
 
@@ -540,6 +610,13 @@ export const generateBiscuitBoardHypergraph = (
     edgeKeySet.add(key);
     const from = nodes[firstNode]!;
     const to = nodes[secondNode]!;
+    const distance = pointDistance(from, to);
+    const isHorizontal = Math.abs(from.y - to.y) <= 1e-7;
+    const isVertical = Math.abs(from.x - to.x) <= 1e-7;
+    const followsPreferredDirection =
+      (!isHorizontal && !isVertical) ||
+      (from.layer === "top" && isHorizontal) ||
+      (from.layer === "bottom" && isVertical);
     const edgeId = edges.length;
     edges.push({
       edgeId,
@@ -547,13 +624,17 @@ export const generateBiscuitBoardHypergraph = (
       kind: "trace",
       fromNode: firstNode,
       toNode: secondNode,
-      cost: pointDistance(from, to),
+      // A modest preferred-direction bias turns the two copper layers into
+      // complementary routing resources: horizontal on top, vertical on
+      // bottom. The edge remains usable in either direction when escaping a
+      // pad or congestion makes the preferred channel impractical.
+      cost: distance * (followsPreferredDirection ? 1 : 1.5),
       blockingObstacleIndexes: getBlockingObstacleIndexes(
         input,
         from.layer,
         from,
         to,
-        margin,
+        maximumTraceMargin,
       ),
       conflictEdgeIds: [],
     });
@@ -572,7 +653,6 @@ export const generateBiscuitBoardHypergraph = (
       addTraceEdge(indexes[index - 1]!, indexes[index]!);
     }
   }
-
   for (const via of prefabricatedVias) {
     const viaNodeIndexes = via.layers.flatMap((layer) => {
       const index = nodeIndexByKey.get(nodeKey(layer, via.x, via.y));
