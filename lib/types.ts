@@ -1,6 +1,12 @@
-import type { SimpleRouteJson, SimplifiedPcbTrace } from "@tscircuit/core";
+import type {
+  SimpleRouteJson,
+  SimplifiedPcbTrace,
+} from "@tscircuit/capacity-autorouter";
 
-export type Point = { x: number; y: number };
+export interface Point {
+  x: number;
+  y: number;
+}
 
 export interface RectBounds {
   minX: number;
@@ -9,131 +15,62 @@ export interface RectBounds {
   maxY: number;
 }
 
-export interface BiscuitBoardAutorouterOptions {
-  routeOrder?: "longest_first" | "shortest_first" | "input";
-  gridPitch?: number;
-  /** Minimum edge-to-edge copper clearance used by graph generation and cleanup. */
-  gridClearance?: number;
+export interface Pipeline7Options {
+  capacityDepth?: number;
+  targetMinCapacity?: number;
+  effort?: number;
+  maxNodeDimension?: number;
+  maxNodeRatio?: number;
+  minNodeArea?: number;
+  /** Minimum edge-to-edge obstacle clearance used by Pipeline7. */
+  clearance?: number;
+  /** Pipeline7 port-pathing cost for an avoidable layer transition. */
   viaTransitionCost?: number;
-  ripCost?: number;
-  crossingCost?: number;
-  historyIncrement?: number;
-  maxBlockersPerSearch?: number;
-  maxRipsPerRoute?: number;
-  maxTotalRips?: number;
-  maxSearchStates?: number;
-  expansionsPerStep?: number;
 }
 
-export interface NormalizedBiscuitBoardAutorouterOptions {
-  routeOrder: "longest_first" | "shortest_first" | "input";
-  gridPitch: number;
-  gridClearance: number;
-  viaTransitionCost: number;
-  ripCost: number;
-  crossingCost: number;
-  historyIncrement: number;
-  maxBlockersPerSearch: number;
-  maxRipsPerRoute: number;
-  maxTotalRips: number;
-  maxSearchStates: number;
-  expansionsPerStep: number;
+export interface ViaAttractionOptions {
+  /** Edge-to-edge clearance used while pushing rubber-band trace legs. */
+  clearance?: number;
+  /** Extra search corridor around a moving via, in millimeters. */
+  detourSearchMargin?: number;
 }
 
-export type RoutingNodeKind = "grid" | "terminal" | "fixed_via";
-
-export interface RoutingNode extends Point {
-  nodeId: string;
-  layer: string;
-  kind: RoutingNodeKind;
-  terminalPointIds: string[];
-  terminalConnectionNames: string[];
-  prefabViaId?: string;
-}
-
-export type RoutingEdge =
-  | {
-      edgeId: number;
-      key: string;
-      kind: "trace";
-      fromNode: number;
-      toNode: number;
-      cost: number;
-      blockingObstacleIndexes: number[];
-      conflictEdgeIds: number[];
-    }
-  | {
-      edgeId: number;
-      key: string;
-      kind: "fixed_via_transition";
-      fromNode: number;
-      toNode: number;
-      cost: number;
-      prefabViaId: string;
-    };
-
-export interface RoutingAdjacency {
-  edgeId: number;
-  toNode: number;
-}
-
-export interface RouteDemand {
-  routeId: string;
-  connectionName: string;
-  netId: string;
-  sourceNode: number;
-  targetNode: number;
-  sourcePointId?: string;
-  targetPointId?: string;
-  width: number;
+export interface BiscuitBoardAutorouterOptions {
+  pipeline7?: Pipeline7Options;
+  viaAttraction?: ViaAttractionOptions;
 }
 
 export interface PrefabricatedVia extends Point {
-  prefabViaId: string;
   obstacleIndex: number;
   layers: string[];
   width: number;
   height: number;
 }
 
-export interface PreparedBiscuitRoutingProblem {
-  input: SimpleRouteJson;
-  options: NormalizedBiscuitBoardAutorouterOptions;
-  layers: string[];
-  nodes: RoutingNode[];
-  edges: RoutingEdge[];
-  adjacency: RoutingAdjacency[][];
-  demands: RouteDemand[];
-  demandById: Map<string, RouteDemand>;
-  prefabricatedVias: PrefabricatedVia[];
-  fixedViaById: Map<string, PrefabricatedVia>;
-}
-
-export interface RoutedConnection {
-  routeId: string;
+export interface ViaAssignment {
+  traceIndex: number;
+  viaOrdinal: number;
   connectionName: string;
-  netId: string;
-  nodePath: number[];
-  edgePath: number[];
-  blockerRouteIds: string[];
+  from: Point;
+  target: PrefabricatedVia;
+  fromLayer: string;
+  toLayer: string;
 }
 
-export interface BiscuitBoardRoutingStats {
-  routeCount: number;
-  routedCount: number;
-  pendingCount: number;
-  ripCount: number;
-  expandedStateCount: number;
-  fixedViaTransitionCount: number;
-  graphNodeCount: number;
-  graphEdgeCount: number;
-  postProcessedClearance?: number;
-  preSimplificationSegmentCount?: number;
-  postSimplificationSegmentCount?: number;
+export interface ViaAttractionStats {
+  inputViaCount: number;
+  movedViaCount: number;
+  repelledTraceLegCount: number;
+  maximumViaMovement: number;
 }
 
-export interface BiscuitBoardRoutingSolution {
-  routes: RoutedConnection[];
+export interface ViaAttractionResult {
   traces: SimplifiedPcbTrace[];
-  stats: BiscuitBoardRoutingStats;
+  assignments: ViaAssignment[];
+  stats: ViaAttractionStats;
+}
+
+export interface BiscuitBoardRoutingSolution extends ViaAttractionResult {
+  input: SimpleRouteJson;
+  pipeline7Traces: SimplifiedPcbTrace[];
 }

@@ -1,71 +1,47 @@
-import type { SimpleRouteJson } from "@tscircuit/core";
+import type {
+  SimpleRouteJson,
+  SimplifiedPcbTrace,
+} from "@tscircuit/capacity-autorouter";
 import {
   BasePipelineSolver,
   definePipelineStep,
   type PipelineStep,
 } from "@tscircuit/solver-utils";
 import type { GraphicsObject } from "graphics-debug";
-import { BuildBiscuitBoardTracesSolver } from "./build-biscuit-board-traces-solver";
-import { GenerateBiscuitBoardHypergraphSolver } from "./generate-biscuit-board-hypergraph-solver";
-import { PostProcessBiscuitBoardTracesSolver } from "./post-process-biscuit-board-traces-solver";
-import { RipUpRubberBandSolver } from "./rip-up-rubber-band-solver";
+import { Pipeline7Solver } from "./pipeline7-solver";
+import { PrefabricatedViaPostprocessingSolver } from "./prefabricated-via-postprocessing-solver";
 import type {
   BiscuitBoardAutorouterOptions,
   BiscuitBoardRoutingSolution,
-  PreparedBiscuitRoutingProblem,
+  ViaAttractionResult,
 } from "./types";
 
 export class BiscuitBoardRoutingPipelineSolver extends BasePipelineSolver<SimpleRouteJson> {
   override pipelineDef: PipelineStep<any>[] = [
     definePipelineStep(
-      "generate-hypergraph",
-      GenerateBiscuitBoardHypergraphSolver,
+      "pipeline7",
+      Pipeline7Solver,
       (instance: BiscuitBoardRoutingPipelineSolver) => [
-        { input: instance.inputProblem, options: instance.options },
+        {
+          input: instance.inputProblem,
+          options: instance.options.pipeline7,
+        },
       ],
     ),
     definePipelineStep(
-      "route-with-rip-and-replace",
-      RipUpRubberBandSolver,
+      "prefabricated-via-attraction",
+      PrefabricatedViaPostprocessingSolver,
       (instance: BiscuitBoardRoutingPipelineSolver) => {
-        const prepared = instance.getStageOutput<PreparedBiscuitRoutingProblem>(
-          "generate-hypergraph",
-        );
-        if (!prepared)
-          throw new Error("Hypergraph generation produced no output");
-        return [prepared];
-      },
-    ),
-    definePipelineStep(
-      "build-and-validate-traces",
-      BuildBiscuitBoardTracesSolver,
-      (instance: BiscuitBoardRoutingPipelineSolver) => {
-        const prepared = instance.getStageOutput<PreparedBiscuitRoutingProblem>(
-          "generate-hypergraph",
-        );
-        const routed = instance.getStageOutput<BiscuitBoardRoutingSolution>(
-          "route-with-rip-and-replace",
-        );
-        if (!prepared || !routed) {
-          throw new Error("Routing pipeline stages produced no output");
-        }
-        return [{ prepared, routed }];
-      },
-    ),
-    definePipelineStep(
-      "post-process-traces",
-      PostProcessBiscuitBoardTracesSolver,
-      (instance: BiscuitBoardRoutingPipelineSolver) => {
-        const prepared = instance.getStageOutput<PreparedBiscuitRoutingProblem>(
-          "generate-hypergraph",
-        );
-        const built = instance.getStageOutput<BiscuitBoardRoutingSolution>(
-          "build-and-validate-traces",
-        );
-        if (!prepared || !built) {
-          throw new Error("Trace post-processing inputs are unavailable");
-        }
-        return [{ prepared, built }];
+        const traces =
+          instance.getStageOutput<SimplifiedPcbTrace[]>("pipeline7");
+        if (!traces) throw new Error("Pipeline7 produced no routed traces");
+        return [
+          {
+            input: instance.inputProblem,
+            traces,
+            options: instance.options.viaAttraction,
+          },
+        ];
       },
     ),
   ];
@@ -75,7 +51,7 @@ export class BiscuitBoardRoutingPipelineSolver extends BasePipelineSolver<Simple
     public readonly options: BiscuitBoardAutorouterOptions = {},
   ) {
     super(input);
-    this.MAX_ITERATIONS = 3_000_000;
+    this.MAX_ITERATIONS = 100_000_001;
   }
 
   override getConstructorParams(): [
@@ -85,18 +61,25 @@ export class BiscuitBoardRoutingPipelineSolver extends BasePipelineSolver<Simple
     return [this.inputProblem, this.options];
   }
 
-  get stage() {
+  get stage(): string {
     return this.getCurrentStageName();
   }
 
   override initialVisualize(): GraphicsObject {
-    return { title: "Biscuit-board routing input" };
+    return { title: "Biscuit-board Simple Route JSON input" };
   }
 
   override getOutput(): BiscuitBoardRoutingSolution | null {
-    return (
-      this.getStageOutput<BiscuitBoardRoutingSolution>("post-process-traces") ??
-      null
+    const pipeline7Traces =
+      this.getStageOutput<SimplifiedPcbTrace[]>("pipeline7");
+    const postprocessed = this.getStageOutput<ViaAttractionResult>(
+      "prefabricated-via-attraction",
     );
+    if (!pipeline7Traces || !postprocessed) return null;
+    return {
+      input: this.inputProblem,
+      pipeline7Traces,
+      ...postprocessed,
+    };
   }
 }

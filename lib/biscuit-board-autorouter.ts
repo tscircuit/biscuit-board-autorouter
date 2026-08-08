@@ -3,9 +3,13 @@ import type {
   AutorouterErrorEvent,
   AutorouterProgressEvent,
   GenericLocalAutorouter,
+  SimpleRouteJson as CoreSimpleRouteJson,
+  SimplifiedPcbTrace as CoreSimplifiedPcbTrace,
+} from "@tscircuit/core";
+import type {
   SimpleRouteJson,
   SimplifiedPcbTrace,
-} from "@tscircuit/core";
+} from "@tscircuit/capacity-autorouter";
 import type { AutorouterConfig } from "@tscircuit/props";
 import { BiscuitBoardRoutingPipelineSolver } from "./biscuit-board-routing-pipeline-solver";
 import type { BiscuitBoardAutorouterOptions } from "./types";
@@ -19,7 +23,7 @@ type EventHandlers = {
 export class BiscuitBoardAutorouter implements GenericLocalAutorouter {
   isRouting = false;
   readonly solver: BiscuitBoardRoutingPipelineSolver;
-  private traces?: SimplifiedPcbTrace[];
+  private traces?: CoreSimplifiedPcbTrace[];
   private readonly handlers: EventHandlers = {
     complete: [],
     error: [],
@@ -27,13 +31,16 @@ export class BiscuitBoardAutorouter implements GenericLocalAutorouter {
   };
 
   constructor(
-    public readonly input: SimpleRouteJson,
+    public readonly input: CoreSimpleRouteJson,
     options: BiscuitBoardAutorouterOptions = {},
   ) {
-    this.solver = new BiscuitBoardRoutingPipelineSolver(input, options);
+    this.solver = new BiscuitBoardRoutingPipelineSolver(
+      input as SimpleRouteJson,
+      options,
+    );
   }
 
-  solveSync(): SimplifiedPcbTrace[] {
+  solveSync(): CoreSimplifiedPcbTrace[] {
     if (this.traces) return this.traces;
     this.solver.solve();
     if (this.solver.failed) {
@@ -41,11 +48,11 @@ export class BiscuitBoardAutorouter implements GenericLocalAutorouter {
     }
     const output = this.solver.getOutput();
     if (!output) throw new Error("Biscuit-board autorouter produced no output");
-    this.traces = output.traces;
+    this.traces = output.traces as CoreSimplifiedPcbTrace[];
     return this.traces;
   }
 
-  getOutputSimpleRouteJson(): SimpleRouteJson | undefined {
+  getOutputSimpleRouteJson(): CoreSimpleRouteJson | undefined {
     if (!this.traces) return undefined;
     return { ...this.input, traces: this.traces };
   }
@@ -112,6 +119,6 @@ export const createBiscuitBoardAutorouter = (
 ): AutorouterConfig => ({
   local: true,
   groupMode: "subcircuit",
-  algorithmFn: async (input: SimpleRouteJson) =>
+  algorithmFn: async (input: CoreSimpleRouteJson) =>
     new BiscuitBoardAutorouter(input, options),
 });

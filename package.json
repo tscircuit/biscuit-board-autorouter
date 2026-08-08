@@ -31,6 +31,7 @@
     "format:check": "biome format ."
   },
   "dependencies": {
+    "@tscircuit/capacity-autorouter": "0.0.767",
     "@tscircuit/core": "^0.0.1621",
     "@tscircuit/props": "^0.0.617",
     "@tscircuit/solver-utils": "^0.0.17",

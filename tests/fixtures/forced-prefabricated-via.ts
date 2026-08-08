@@ -1,4 +1,4 @@
-import type { SimpleRouteJson } from "@tscircuit/core";
+import type { SimpleRouteJson } from "@tscircuit/capacity-autorouter";
 
 export const forcedPrefabricatedViaFixture: SimpleRouteJson = {
   bounds: { minX: -8, maxX: 8, minY: -3, maxY: 6 },
@@ -28,7 +28,6 @@ export const forcedPrefabricatedViaFixture: SimpleRouteJson = {
     {
       obstacleId: "prefab-via-1",
       type: "rect",
-      shape: "circle",
       width: 0.6,
       height: 0.6,
       center: { x: 0, y: 4 },

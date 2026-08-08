@@ -1,13 +1,9 @@
 # biscuit-board-autorouter
 
-A fixed-via autorouter for prefabricated tscircuit biscuit boards.
+Pipeline7 autorouting followed by collision-aware prefabricated-via attraction
+for tscircuit biscuit boards.
 
 **[Open the live Cosmos solver debugger](https://biscuit-board-autorouter.vercel.app)**
-
-The solver is deliberately unable to create arbitrary vias. It generates
-cross-layer hyperedges only for multi-layer Simple Route JSON obstacles marked
-`netIsAssignable: true`; the output stage independently rejects any via that
-does not match one of those obstacle coordinates and layer pairs.
 
 ## Usage
 
@@ -19,31 +15,32 @@ import { createBiscuitBoardAutorouter } from "@tscircuit/biscuit-board-autoroute
   height="55mm"
   autorouter={createBiscuitBoardAutorouter()}
 >
-  {/* components and traces */}
+  {/* components, assignable prefabricated vias, and traces */}
 </board>
 ```
 
-The exported `BiscuitBoardAutorouter` also implements tscircuit's
+The exported `BiscuitBoardAutorouter` implements tscircuit's
 `GenericLocalAutorouter` interface for direct use and testing.
 
 ## Pipeline
 
-1. `GenerateBiscuitBoardHypergraphSolver` builds a sparse rectilinear routing
-   hypergraph from terminals, expanded obstacle boundaries, board bounds, and
-   prefabricated via coordinates. Trace-edge conflicts are computed once and
-   stored as compact incidence lists.
-2. `RipUpRubberBandSolver` performs A* routing with distinct blocker state,
-   negotiated rip-and-replace, and history costs.
-3. `BuildBiscuitBoardTracesSolver` removes redundant collinear vertices,
-   creates tscircuit traces, and validates the fixed-via invariant again.
-4. `PostProcessBiscuitBoardTracesSolver` enforces 0.2 mm copper clearance and
-   greedily replaces whole stair-step runs with clearance-safe Manhattan/45°
-   shortcuts. Its visualization overlays the original routes, obstacle/pad
-   geometry, clearance envelopes, prefabricated vias, and simplified traces.
+1. `Pipeline7Solver` runs `AutoroutingPipelineSolver7_MultiGraph` from
+   [`@tscircuit/capacity-autorouter`](https://github.com/tscircuit/tscircuit-autorouter),
+   with a 0.2 mm minimum obstacle clearance and prefab vias kept as hard
+   obstacles during the global solve.
+2. `PrefabricatedViaPostprocessingSolver` assigns every Pipeline7 via to an
+   unused, compatible, reachable Simple Route JSON obstacle marked
+   `netIsAssignable`.
+3. Each via is attracted to its assigned prefabricated coordinate. Its two
+   adjacent trace legs behave like rubber bands; visibility-graph and grid
+   searches use expanded pad corners and trace-repulsion sites to push copper
+   around obstacles and foreign traces.
+4. A global collision pass pushes either trace aside if a pull introduces an
+   intersection. The output validator rejects unassigned vias, then converts
+   each selected layer transition to `through_obstacle` so core claims the
+   existing copper instead of manufacturing a duplicate via.
 
-This split is intentional: graph generation is independently visualizable and
-testable because it is the highest-risk part of the solver. See
-[ARCHITECTURE.md](./ARCHITECTURE.md).
+See [ARCHITECTURE.md](./ARCHITECTURE.md) for the algorithm and invariants.
 
 ## Development
 
@@ -53,17 +50,10 @@ bun run dev
 bun run build
 bun run test
 bun run format:check
+bun run build:site
 ```
 
-Cosmos exposes the generated hypergraph and every live pipeline stage through
-`GenericSolverDebugger`:
-
-- `examples/exampleXX.page.tsx` contains small synthetic inputs that isolate
-  one solver behavior.
-- `repros/reproXX.page.tsx` contains exact, checked-in autorouter inputs
-  captured from real projects. Repro 01 is the complete BiscuitBoard
-  STM32C071FBP6 routing problem.
-
-Tests include SVG matching, forced layer transitions, the
-no-prefabricated-via failure case, negotiated rip-and-replace, and the complete
-STM32 real-project repro.
+The repository follows the
+[`tscircuit/handbook` solver bootstrap](https://github.com/tscircuit/handbook/blob/main/guides/bootstrapping-repos.md):
+Cosmos, `GenericSolverDebugger`, `graphics-debug`, SVG matching, a staged
+solver-utils pipeline, and CI for tests, types, and formatting.

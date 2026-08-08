@@ -1,74 +1,59 @@
 # Architecture
 
-## Why graph generation is a pipeline stage
+## Why this is a post-processor
 
-The search problem is only useful if its topology represents the copper that
-can actually be fabricated. A generic multilayer autorouter can discover a
-good path and then place a via wherever it needs one; a biscuit board cannot.
+Pipeline7 is responsible for the hard global problem: topology planning,
+capacity routing, high-density routing, exact-geometry DRC repair, and final
+trace construction. A prefabricated board adds a narrower manufacturing
+constraint after that solve: layer transitions may only use holes that already
+exist in the copper clad.
 
-The generator therefore derives coordinates from:
+`BiscuitBoardRoutingPipelineSolver` therefore has two visible stages:
 
-- connection terminals;
-- prefabricated via centers;
-- clearance-expanded obstacle sides; and
-- the board bounds.
+1. `Pipeline7Solver` adapts `AutoroutingPipelineSolver7_MultiGraph` to the
+   standard solver-utils interface without hiding Pipeline7's progress,
+   preview, or graphics-debug output. Assignable prefab vias are hardened for
+   this stage, preventing the unassigned global route from crossing them.
+2. `PrefabricatedViaPostprocessingSolver` attracts Pipeline7's vias onto the
+   board's assignable prefabricated vias and relaxes the attached copper.
 
-It takes the Cartesian intersections of those coordinates on each copper
-layer and connects neighboring visible sites. This makes narrow corridors and
-obstacle corners explicit. A coarse regular lattice adds parallel channels in
-wide free-space regions without rasterizing at trace-width resolution. Pad
-interiors remain net-restricted. Copper-pour obstacles are left to the pour
-stage.
+## Via attraction and assignment
 
-Every multi-layer obstacle with `netIsAssignable: true` gets one site per
-declared layer. Only those colocated sites receive cross-layer hyperedges. This
-is the primary no-new-vias guarantee. Layer transitions carry a deliberately
-high soft cost, so the router uses a prefabricated via only when it materially
-improves or enables the route.
+Prefabricated vias are the multi-layer Simple Route JSON obstacles marked
+`netIsAssignable: true`. A via can only be assigned to a target supporting its
+`from_layer` and `to_layer`, and a target is reserved by at most one routed net.
+Pipeline7 vias are processed by distance to their nearest compatible target.
+For each via, candidate targets are tried nearest-first and accepted only when
+the moved legs and global collision pass produce a valid route. If no reachable
+compatible target remains, the solver fails rather than emitting a
+manufacturing via.
 
-## Relationship to tiny-hypergraph
+## Trace repulsion
 
-The architecture follows the same separation used by
-[`tscircuit/tiny-hypergraph`](https://github.com/tscircuit/tiny-hypergraph):
-immutable topology, compact incidence data, and mutable route ownership.
-Tiny-hypergraph's angle-pair cache avoids repeatedly testing geometry inside a
-region. Here, the equivalent hot-loop optimization is a precomputed conflict
-list on each trace hyperedge. A* checks route owners through those lists rather
-than recomputing segment intersections for every candidate.
+Moving a via changes the two wire legs adjacent to the layer transition. A
+straight pull can cross a pad or another trace, so each leg is rebuilt on a
+small visibility graph:
 
-Simple Route JSON may express one electrical net as several connections that
-share a terminal. The generator coalesces those connections before ownership
-checks, so branches may meet at that terminal without entering a rip loop.
+- pad and via rectangles are expanded by trace half-width plus clearance;
+- rectangle corners become obstacle-repulsion sites;
+- foreign trace endpoints are offset along tangent and normal directions to
+  create trace-repulsion sites around their clearance capsules;
+- only mutually visible sites are connected;
+- Dijkstra chooses the shortest collision-free rubber-band path; and
+- an A* grid search handles winding channels that the sparse visibility graph
+  cannot express.
 
-The package does not feed the raw Simple Route JSON directly into
-tiny-hypergraph because that would leave the hard and board-specific topology
-generation problem unsolved. The generated topology is exposed as
-`PreparedBiscuitRoutingProblem`, so a future region-based backend can replace
-the current search without changing the fixed-via contract.
-
-## Rip-and-replace
-
-Each search state records the distinct committed routes it would cross. A
-route may accept a bounded set of blockers at a rip cost. When committed, those
-routes are removed and requeued; their old edges receive a history penalty so
-the same conflict becomes progressively less attractive. This is a negotiated
-congestion loop rather than one-pass greedy routing.
+If the moving leg and a foreign trace still conflict, the global collision pass
+tries pushing either segment through the same visibility/grid search. This
+preserves the Pipeline7 route outside the affected neighborhoods. The selected
+prefabricated via is excluded from blocking geometry for its own net; all other
+unused prefabricated vias remain obstacles.
 
 ## Output invariant
 
-The topology makes arbitrary layer changes unreachable. The trace builder then
-performs a second, independent check: each emitted `route_type: "via"` must
-match the coordinate and both layers of a prefabricated via obstacle. A mismatch
-throws instead of silently manufacturing copper.
-
-## Trace post-processing
-
-The final pipeline stage validates 0.2 mm edge-to-edge copper clearance against
-foreign-net traces, pads, and prefabricated vias. Between immutable layer-change
-boundaries, it greedily extends a shortcut head across the original route and
-generates only Manhattan/45-degree candidates. This follows the trace
-simplification architecture in `tscircuit/tscircuit-autorouter`: the farthest
-clear candidate is committed while the remaining routed traces are treated as
-immutable copper. Every candidate segment is checked independently against the
-same clearance model, and the complete output is validated again before it is
-returned.
+After all relaxations, every Pipeline7 via is checked against the set of
+assigned prefabricated coordinates. Each is then emitted as a zero-length
+`route_type: "through_obstacle"` layer transition, allowing tscircuit core to
+claim the existing assignable PCB via without creating duplicate copper. A
+missing target, unreachable relaxation, or unresolved crossing is a hard solver
+failure. There is no fallback that silently keeps Pipeline7's arbitrary via.

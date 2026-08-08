@@ -1,4 +1,4 @@
-import type { SimpleRouteJson } from "@tscircuit/core";
+import type { SimpleRouteJson } from "@tscircuit/capacity-autorouter";
 import { GenericSolverDebugger } from "@tscircuit/solver-utils/react";
 import { BiscuitBoardRoutingPipelineSolver } from "../lib";
 import capturedInput from "./fixtures/repro01-biscuit-board-stm32.srj.json";
