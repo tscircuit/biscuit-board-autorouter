@@ -951,6 +951,148 @@ const repelTraceSegment = ({
   return true;
 };
 
+const getFirstTraceObstacleCollision = ({
+  input,
+  traces,
+  assignments,
+  clearance,
+}: {
+  input: SimpleRouteJson;
+  traces: SimplifiedPcbTrace[];
+  assignments: ViaAssignment[];
+  clearance: number;
+}): TraceSegment | null => {
+  for (const segment of getTraceSegments(traces)) {
+    const trace = traces[segment.traceIndex]!;
+    const ignoredObstacleIndexes = new Set(
+      assignments
+        .filter((assignment) => assignment.traceIndex === segment.traceIndex)
+        .map((assignment) => assignment.target.obstacleIndex),
+    );
+    const rectangles = getBlockingRectangles({
+      input,
+      trace,
+      layer: segment.layer,
+      ignoredObstacleIndexes,
+      wireWidth: segment.width,
+      clearance,
+    });
+    if (
+      rectangles.some((rectangle) =>
+        segmentIntersectsRectInterior(segment.start, segment.end, rectangle),
+      )
+    ) {
+      return segment;
+    }
+  }
+  return null;
+};
+
+const repelTraceSegmentFromObstacles = ({
+  input,
+  traces,
+  movingSegment,
+  assignments,
+  clearance,
+  searchMargin,
+}: {
+  input: SimpleRouteJson;
+  traces: SimplifiedPcbTrace[];
+  movingSegment: TraceSegment;
+  assignments: ViaAssignment[];
+  clearance: number;
+  searchMargin: number;
+}): boolean => {
+  const trace = traces[movingSegment.traceIndex]!;
+  const ignoredObstacleIndexes = new Set(
+    assignments
+      .filter(
+        (assignment) => assignment.traceIndex === movingSegment.traceIndex,
+      )
+      .map((assignment) => assignment.target.obstacleIndex),
+  );
+  const path = findRepelledPath({
+    start: movingSegment.start,
+    end: movingSegment.end,
+    boardBounds: {
+      minX: input.bounds.minX + clearance,
+      minY: input.bounds.minY + clearance,
+      maxX: input.bounds.maxX - clearance,
+      maxY: input.bounds.maxY - clearance,
+    },
+    rectangles: getBlockingRectangles({
+      input,
+      trace,
+      layer: movingSegment.layer,
+      ignoredObstacleIndexes,
+      wireWidth: movingSegment.width,
+      clearance,
+    }),
+    traceSegments: getTraceSegments(traces).filter(
+      (segment) =>
+        segment.traceIndex !== movingSegment.traceIndex &&
+        segment.connectionName !== movingSegment.connectionName &&
+        segment.layer === movingSegment.layer,
+    ),
+    requiredTraceClearance: movingSegment.width / 2 + clearance,
+    searchMargin,
+    allowTraceCrossingFallback: false,
+  });
+  if (path.length <= 2) return false;
+  trace.route = [
+    ...trace.route.slice(0, movingSegment.startRouteIndex + 1),
+    ...path
+      .slice(1, -1)
+      .map((point) =>
+        makeWirePoint(point, movingSegment.layer, movingSegment.width),
+      ),
+    ...trace.route.slice(movingSegment.endRouteIndex),
+  ];
+  return true;
+};
+
+/** Pushes every routed segment away from foreign pads and unused vias. */
+const repelTraceObstacleCollisions = ({
+  input,
+  traces,
+  assignments,
+  clearance,
+  searchMargin,
+}: {
+  input: SimpleRouteJson;
+  traces: SimplifiedPcbTrace[];
+  assignments: ViaAssignment[];
+  clearance: number;
+  searchMargin: number;
+}): number => {
+  let repelledSegmentCount = 0;
+  for (let iteration = 0; iteration < 250; iteration += 1) {
+    const collision = getFirstTraceObstacleCollision({
+      input,
+      traces,
+      assignments,
+      clearance,
+    });
+    if (!collision) return repelledSegmentCount;
+    if (
+      !repelTraceSegmentFromObstacles({
+        input,
+        traces,
+        movingSegment: collision,
+        assignments,
+        clearance,
+        searchMargin,
+      })
+    ) {
+      throw new Error(
+        `Trace repulsion could not move "${collision.connectionName}" away from a foreign obstacle`,
+      );
+    }
+    repelledSegmentCount += 1;
+  }
+  throw new Error("Trace obstacle repulsion exceeded 250 moves");
+};
+
 /** Resolves crossings introduced by a via pull by pushing either trace aside. */
 const repelIntroducedTraceCollisions = ({
   input,
@@ -1245,7 +1387,21 @@ export class PrefabricatedViaPostprocessingSolver extends BaseSolver {
       usedTargetObstacleIndexes.add(selected.assignment.target.obstacleIndex);
       repelledTraceLegCount += selected.repelledTraceLegCount;
     }
+    repelledTraceLegCount += repelTraceObstacleCollisions({
+      input: this.params.input,
+      traces,
+      assignments,
+      clearance,
+      searchMargin,
+    });
     repelledTraceLegCount += repelIntroducedTraceCollisions({
+      input: this.params.input,
+      traces,
+      assignments,
+      clearance,
+      searchMargin,
+    });
+    repelledTraceLegCount += repelTraceObstacleCollisions({
       input: this.params.input,
       traces,
       assignments,
