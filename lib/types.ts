@@ -14,8 +14,6 @@ export interface BiscuitBoardAutorouterOptions {
   gridPitch?: number;
   /** Minimum edge-to-edge copper clearance used by graph generation and cleanup. */
   gridClearance?: number;
-  /** Maximum setback used when replacing a 90-degree corner with a 45-degree chamfer. */
-  chamferDistance?: number;
   viaTransitionCost?: number;
   ripCost?: number;
   crossingCost?: number;
@@ -31,7 +29,6 @@ export interface NormalizedBiscuitBoardAutorouterOptions {
   routeOrder: "longest_first" | "shortest_first" | "input";
   gridPitch: number;
   gridClearance: number;
-  chamferDistance: number;
   viaTransitionCost: number;
   ripCost: number;
   crossingCost: number;
@@ -131,7 +128,8 @@ export interface BiscuitBoardRoutingStats {
   graphNodeCount: number;
   graphEdgeCount: number;
   postProcessedClearance?: number;
-  chamferedCornerCount?: number;
+  preSimplificationSegmentCount?: number;
+  postSimplificationSegmentCount?: number;
 }
 
 export interface BiscuitBoardRoutingSolution {

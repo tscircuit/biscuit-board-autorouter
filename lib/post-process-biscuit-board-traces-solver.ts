@@ -192,41 +192,43 @@ export const getTraceClearanceViolations = (
   return violations;
 };
 
-const segmentHasClearance = (
+const createSegmentClearanceChecker = (
   prepared: PreparedBiscuitRoutingProblem,
   solution: BiscuitBoardRoutingSolution,
   traceIndex: number,
-  segment: TraceSegment,
   clearance: number,
 ) => {
   const contexts = getTraceContexts(prepared, solution);
   const context = contexts[traceIndex]!;
-  for (const [obstacleIndex, obstacle] of prepared.input.obstacles.entries()) {
-    if (
-      obstacle.isCopperPour ||
-      !obstacle.layers.includes(segment.start.layer) ||
-      obstacleAllowsSegment(prepared, context, obstacleIndex, segment)
-    ) {
-      continue;
+  const blockingTraceSegments = contexts.flatMap((other, otherIndex) =>
+    otherIndex === traceIndex || other.demand.netId === context.demand.netId
+      ? []
+      : getSegments(other.trace),
+  );
+
+  return (segment: TraceSegment) => {
+    for (const [
+      obstacleIndex,
+      obstacle,
+    ] of prepared.input.obstacles.entries()) {
+      if (
+        obstacle.isCopperPour ||
+        !obstacle.layers.includes(segment.start.layer) ||
+        obstacleAllowsSegment(prepared, context, obstacleIndex, segment)
+      ) {
+        continue;
+      }
+      if (
+        segmentIntersectsRectInterior(
+          segment.start,
+          segment.end,
+          obstacleBounds(obstacle, segment.start.width / 2 + clearance),
+        )
+      ) {
+        return false;
+      }
     }
-    if (
-      segmentIntersectsRectInterior(
-        segment.start,
-        segment.end,
-        obstacleBounds(obstacle, segment.start.width / 2 + clearance),
-      )
-    ) {
-      return false;
-    }
-  }
-  for (const [otherIndex, other] of contexts.entries()) {
-    if (
-      otherIndex === traceIndex ||
-      other.demand.netId === context.demand.netId
-    ) {
-      continue;
-    }
-    for (const otherSegment of getSegments(other.trace)) {
+    for (const otherSegment of blockingTraceSegments) {
       if (otherSegment.start.layer !== segment.start.layer) continue;
       const minimumCenterDistance =
         segment.start.width / 2 + otherSegment.start.width / 2 + clearance;
@@ -242,59 +244,147 @@ const segmentHasClearance = (
         return false;
       }
     }
-  }
-  return true;
+    return true;
+  };
 };
 
-const getChamferPoints = (
-  previous: WirePoint,
-  corner: WirePoint,
-  next: WirePoint,
-  maximumDistance: number,
-): [WirePoint, WirePoint] | null => {
+// Adapted from tscircuit-autorouter's calculate45DegreePaths utility. Each
+// candidate contains at most one bend and uses only 0, 45, or 90 degree axes.
+const calculate45DegreePaths = (start: Point, end: Point): Point[][] => {
+  const paths: Point[][] = [];
+  const dx = Math.abs(end.x - start.x);
+  const dy = Math.abs(end.y - start.y);
+  const signX = end.x > start.x ? 1 : -1;
+  const signY = end.y > start.y ? 1 : -1;
+  const horizontalThenDiagonal = {
+    x: end.x - signX * dy,
+    y: start.y,
+  };
   if (
-    previous.layer !== corner.layer ||
-    corner.layer !== next.layer ||
-    maximumDistance <= 0
+    (horizontalThenDiagonal.x - start.x) * signX >= 0 &&
+    (horizontalThenDiagonal.x - end.x) * signX <= 0
   ) {
-    return null;
+    paths.push([start, horizontalThenDiagonal, end]);
   }
-  const incoming = { x: corner.x - previous.x, y: corner.y - previous.y };
-  const outgoing = { x: next.x - corner.x, y: next.y - corner.y };
-  const incomingLength = Math.hypot(incoming.x, incoming.y);
-  const outgoingLength = Math.hypot(outgoing.x, outgoing.y);
-  const incomingIsAxisAligned =
-    Math.abs(incoming.x) <= EPSILON || Math.abs(incoming.y) <= EPSILON;
-  const outgoingIsAxisAligned =
-    Math.abs(outgoing.x) <= EPSILON || Math.abs(outgoing.y) <= EPSILON;
-  const dot = incoming.x * outgoing.x + incoming.y * outgoing.y;
+  const verticalThenDiagonal = {
+    x: start.x,
+    y: end.y - signY * dx,
+  };
   if (
-    incomingLength <= EPSILON ||
-    outgoingLength <= EPSILON ||
-    !incomingIsAxisAligned ||
-    !outgoingIsAxisAligned ||
-    Math.abs(dot) > EPSILON
+    (verticalThenDiagonal.y - start.y) * signY >= 0 &&
+    (verticalThenDiagonal.y - end.y) * signY <= 0
   ) {
-    return null;
+    paths.push([start, verticalThenDiagonal, end]);
   }
-  const distance = Math.min(
-    maximumDistance,
-    incomingLength / 2,
-    outgoingLength / 2,
-  );
-  if (distance <= EPSILON) return null;
-  return [
-    {
-      ...corner,
-      x: corner.x - (incoming.x / incomingLength) * distance,
-      y: corner.y - (incoming.y / incomingLength) * distance,
-    },
-    {
-      ...corner,
-      x: corner.x + (outgoing.x / outgoingLength) * distance,
-      y: corner.y + (outgoing.y / outgoingLength) * distance,
-    },
-  ];
+  const diagonalThenAxis = {
+    x: start.x + signX * Math.min(dx, dy),
+    y: start.y + signY * Math.min(dx, dy),
+  };
+  paths.push([start, diagonalThenAxis, end]);
+  return paths;
+};
+
+const toWirePath = (path: Point[], template: WirePoint): WirePoint[] => {
+  const result: WirePoint[] = [];
+  for (const point of path) {
+    const wirePoint = { ...template, x: point.x, y: point.y };
+    if (!result.some((existing) => pointsEqual(existing, wirePoint))) {
+      result.push(wirePoint);
+    }
+  }
+  return result;
+};
+
+const collapseCollinearWirePoints = (points: WirePoint[]): WirePoint[] => {
+  if (points.length <= 2) return points;
+  const result = [points[0]!];
+  for (let index = 1; index < points.length - 1; index++) {
+    const previous = result[result.length - 1]!;
+    const current = points[index]!;
+    const next = points[index + 1]!;
+    const incoming = {
+      x: current.x - previous.x,
+      y: current.y - previous.y,
+    };
+    const outgoing = { x: next.x - current.x, y: next.y - current.y };
+    const cross = incoming.x * outgoing.y - incoming.y * outgoing.x;
+    const dot = incoming.x * outgoing.x + incoming.y * outgoing.y;
+    if (Math.abs(cross) <= EPSILON && dot >= 0) continue;
+    result.push(current);
+  }
+  result.push(points[points.length - 1]!);
+  return result;
+};
+
+const simplifyWireRun = (
+  run: WirePoint[],
+  segmentHasClearance: (segment: TraceSegment) => boolean,
+): WirePoint[] => {
+  if (run.length <= 2) return run;
+  const simplified: WirePoint[] = [run[0]!];
+  let tailIndex = 0;
+
+  while (tailIndex < run.length - 1) {
+    let acceptedPath: WirePoint[] | null = null;
+    let acceptedHeadIndex = -1;
+    for (let headIndex = run.length - 1; headIndex > tailIndex; headIndex--) {
+      const start = run[tailIndex]!;
+      const end = run[headIndex]!;
+      for (const pointPath of calculate45DegreePaths(start, end)) {
+        const wirePath = toWirePath(pointPath, start);
+        if (
+          wirePath.length >= 2 &&
+          wirePath.slice(1).every((point, index) =>
+            segmentHasClearance({
+              start: wirePath[index]!,
+              end: point,
+            }),
+          )
+        ) {
+          acceptedPath = wirePath;
+          acceptedHeadIndex = headIndex;
+          break;
+        }
+      }
+      if (acceptedPath) break;
+    }
+    if (!acceptedPath || acceptedHeadIndex <= tailIndex) {
+      throw new Error(
+        `Trace simplification could not preserve the validated segment after point ${tailIndex}`,
+      );
+    }
+    simplified.push(...acceptedPath.slice(1));
+    tailIndex = acceptedHeadIndex;
+  }
+
+  return collapseCollinearWirePoints(simplified);
+};
+
+const simplifyTraceRoute = (
+  route: SimplifiedPcbTrace["route"],
+  segmentHasClearance: (segment: TraceSegment) => boolean,
+): SimplifiedPcbTrace["route"] => {
+  const simplified: SimplifiedPcbTrace["route"] = [];
+  let pointIndex = 0;
+  while (pointIndex < route.length) {
+    const point = route[pointIndex]!;
+    if (point.route_type !== "wire") {
+      simplified.push(point);
+      pointIndex++;
+      continue;
+    }
+    const run: WirePoint[] = [point];
+    let runEndIndex = pointIndex + 1;
+    while (runEndIndex < route.length) {
+      const next = route[runEndIndex]!;
+      if (next.route_type !== "wire" || next.layer !== point.layer) break;
+      run.push(next);
+      runEndIndex++;
+    }
+    simplified.push(...simplifyWireRun(run, segmentHasClearance));
+    pointIndex = runEndIndex;
+  }
+  return simplified;
 };
 
 const cloneTraces = (traces: SimplifiedPcbTrace[]) =>
@@ -320,59 +410,26 @@ export const postProcessBiscuitBoardTraces = (
   }
 
   const traces = cloneTraces(solution.traces);
-  let chamferedCornerCount = 0;
+  const preSimplificationSegmentCount = traces.reduce(
+    (count, trace) => count + getSegments(trace).length,
+    0,
+  );
   for (let traceIndex = 0; traceIndex < traces.length; traceIndex++) {
-    let route = traces[traceIndex]!.route;
-    let pointIndex = 1;
-    while (pointIndex < route.length - 1) {
-      const previous = route[pointIndex - 1]!;
-      const corner = route[pointIndex]!;
-      const next = route[pointIndex + 1]!;
-      if (
-        previous.route_type !== "wire" ||
-        corner.route_type !== "wire" ||
-        next.route_type !== "wire"
-      ) {
-        pointIndex++;
-        continue;
-      }
-      const chamfer = getChamferPoints(
-        previous,
-        corner,
-        next,
-        prepared.options.chamferDistance,
-      );
-      if (!chamfer) {
-        pointIndex++;
-        continue;
-      }
-      const candidateRoute = [
-        ...route.slice(0, pointIndex),
-        ...chamfer,
-        ...route.slice(pointIndex + 1),
-      ];
-      const candidateTraces = traces.map((trace, index) =>
-        index === traceIndex ? { ...trace, route: candidateRoute } : trace,
-      );
-      const candidateSolution = { ...solution, traces: candidateTraces };
-      if (
-        segmentHasClearance(
-          prepared,
-          candidateSolution,
-          traceIndex,
-          { start: chamfer[0], end: chamfer[1] },
-          clearance,
-        )
-      ) {
-        traces[traceIndex] = { ...traces[traceIndex]!, route: candidateRoute };
-        route = candidateRoute;
-        chamferedCornerCount++;
-        pointIndex += 2;
-      } else {
-        pointIndex++;
-      }
-    }
+    const segmentHasClearance = createSegmentClearanceChecker(
+      prepared,
+      { ...solution, traces },
+      traceIndex,
+      clearance,
+    );
+    traces[traceIndex] = {
+      ...traces[traceIndex]!,
+      route: simplifyTraceRoute(traces[traceIndex]!.route, segmentHasClearance),
+    };
   }
+  const postSimplificationSegmentCount = traces.reduce(
+    (count, trace) => count + getSegments(trace).length,
+    0,
+  );
 
   const output: BiscuitBoardRoutingSolution = {
     ...solution,
@@ -380,7 +437,8 @@ export const postProcessBiscuitBoardTraces = (
     stats: {
       ...solution.stats,
       postProcessedClearance: clearance,
-      chamferedCornerCount,
+      preSimplificationSegmentCount,
+      postSimplificationSegmentCount,
     },
   };
   const finalViolations = getTraceClearanceViolations(
@@ -395,25 +453,112 @@ export const postProcessBiscuitBoardTraces = (
 };
 
 const visualizeTraces = (
+  prepared: PreparedBiscuitRoutingProblem,
+  built: BiscuitBoardRoutingSolution,
   solution: BiscuitBoardRoutingSolution,
-): GraphicsObject => ({
-  title: `Clearance-safe trace cleanup (${solution.stats.chamferedCornerCount ?? 0} chamfered corners)`,
-  lines: solution.routes.flatMap((route, index) => {
+): GraphicsObject => {
+  const clearance = getEffectiveTraceClearance(prepared);
+  const maximumTraceRadius =
+    Math.max(
+      ...solution.traces
+        .flatMap((trace) => getSegments(trace))
+        .map((segment) => segment.start.width),
+      prepared.input.minTraceWidth,
+    ) / 2;
+  const rects: NonNullable<GraphicsObject["rects"]> = [];
+  const circles: NonNullable<GraphicsObject["circles"]> = [];
+  for (const [obstacleIndex, obstacle] of prepared.input.obstacles.entries()) {
+    if (obstacle.isCopperPour) continue;
+    const identifier =
+      obstacle.connectedTo.find((id) => id.startsWith("pcb_smtpad")) ??
+      obstacle.connectedTo.find((id) => id.startsWith("pcb_via")) ??
+      obstacle.componentId ??
+      obstacle.obstacleId ??
+      `obstacle-${obstacleIndex}`;
+    const label = obstacle.netIsAssignable
+      ? `prefabricated via · ${identifier}`
+      : `pad/obstacle · ${identifier}`;
+    const envelope = obstacleBounds(obstacle, maximumTraceRadius + clearance);
+    rects.push({
+      center: {
+        x: (envelope.minX + envelope.maxX) / 2,
+        y: (envelope.minY + envelope.maxY) / 2,
+      },
+      width: envelope.maxX - envelope.minX,
+      height: envelope.maxY - envelope.minY,
+      fill: obstacle.netIsAssignable
+        ? "rgba(14,165,233,0.06)"
+        : "rgba(239,68,68,0.045)",
+      stroke: obstacle.netIsAssignable
+        ? "rgba(2,132,199,0.24)"
+        : "rgba(220,38,38,0.16)",
+      label: `${label} · ${clearance}mm clearance envelope`,
+    });
+    if (obstacle.shape === "circle") {
+      circles.push({
+        center: obstacle.center,
+        radius: Math.max(obstacle.width, obstacle.height) / 2,
+        fill: obstacle.netIsAssignable
+          ? "rgba(14,165,233,0.42)"
+          : "rgba(168,85,247,0.35)",
+        stroke: obstacle.netIsAssignable ? "#0284c7" : "#7e22ce",
+        label,
+      });
+    } else {
+      rects.push({
+        center: obstacle.center,
+        width: obstacle.width,
+        height: obstacle.height,
+        fill: obstacle.layers.includes("top")
+          ? "rgba(249,115,22,0.30)"
+          : "rgba(79,70,229,0.26)",
+        stroke: obstacle.layers.includes("top") ? "#c2410c" : "#4338ca",
+        label,
+      });
+    }
+  }
+
+  const originalLines = built.traces.flatMap((trace) =>
+    getSegments(trace).map((segment) => ({
+      points: [segment.start, segment.end],
+      strokeColor: "rgba(100,116,139,0.30)",
+      strokeWidth: Math.min(segment.start.width, 0.07),
+      strokeDash: [0.12, 0.08],
+      label: "original unsimplified trace",
+    })),
+  );
+  const simplifiedLines = solution.routes.flatMap((route, index) => {
     const color = netColor(route.netId);
     return getSegments(solution.traces[index]!).map((segment) => ({
       points: [segment.start, segment.end],
       strokeColor: color,
       strokeWidth: segment.start.width,
+      zIndex: 2,
+      label: `simplified trace · ${route.netId}`,
     }));
-  }),
-  points: solution.traces.flatMap((trace) =>
-    trace.route.flatMap((point) =>
-      point.route_type === "via"
-        ? [{ x: point.x, y: point.y, color: "#0284c7", label: "fixed via" }]
-        : [],
+  });
+  return {
+    coordinateSystem: "cartesian",
+    title: `Clearance-safe trace simplification (${solution.stats.preSimplificationSegmentCount ?? 0} → ${solution.stats.postSimplificationSegmentCount ?? 0} segments, ${clearance}mm clearance)`,
+    rects,
+    circles,
+    lines: [...originalLines, ...simplifiedLines],
+    points: solution.traces.flatMap((trace) =>
+      trace.route.flatMap((point) =>
+        point.route_type === "via"
+          ? [
+              {
+                x: point.x,
+                y: point.y,
+                color: "#0369a1",
+                label: "used prefabricated via",
+              },
+            ]
+          : [],
+      ),
     ),
-  ),
-});
+  };
+};
 
 export class PostProcessBiscuitBoardTracesSolver extends BaseSolver {
   private output?: BiscuitBoardRoutingSolution;
@@ -446,6 +591,10 @@ export class PostProcessBiscuitBoardTracesSolver extends BaseSolver {
   }
 
   override visualize(): GraphicsObject {
-    return visualizeTraces(this.output ?? this.params.built);
+    return visualizeTraces(
+      this.params.prepared,
+      this.params.built,
+      this.output ?? this.params.built,
+    );
   }
 }

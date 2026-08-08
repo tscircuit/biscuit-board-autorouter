@@ -32,7 +32,6 @@ const DEFAULT_OPTIONS: NormalizedBiscuitBoardAutorouterOptions = {
   routeOrder: "longest_first",
   gridPitch: 1.5,
   gridClearance: 0.2,
-  chamferDistance: 0.5,
   viaTransitionCost: 20,
   ripCost: 10,
   crossingCost: 0.25,
@@ -68,12 +67,6 @@ const normalizeOptions = (
     normalized.gridClearance < 0
   ) {
     throw new Error("options.gridClearance must be non-negative");
-  }
-  if (
-    !Number.isFinite(normalized.chamferDistance) ||
-    normalized.chamferDistance < 0
-  ) {
-    throw new Error("options.chamferDistance must be non-negative");
   }
   if (
     !Number.isFinite(normalized.crossingCost) ||

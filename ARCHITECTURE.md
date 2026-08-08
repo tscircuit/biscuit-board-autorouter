@@ -64,7 +64,11 @@ throws instead of silently manufacturing copper.
 ## Trace post-processing
 
 The final pipeline stage validates 0.2 mm edge-to-edge copper clearance against
-foreign-net traces, pads, and prefabricated vias. It then considers each
-orthogonal corner independently. A corner is replaced by a pair of 45-degree
-segments only when the complete candidate output still passes that clearance
-check; otherwise the original Manhattan corner is retained.
+foreign-net traces, pads, and prefabricated vias. Between immutable layer-change
+boundaries, it greedily extends a shortcut head across the original route and
+generates only Manhattan/45-degree candidates. This follows the trace
+simplification architecture in `tscircuit/tscircuit-autorouter`: the farthest
+clear candidate is committed while the remaining routed traces are treated as
+immutable copper. Every candidate segment is checked independently against the
+same clearance model, and the complete output is validated again before it is
+returned.

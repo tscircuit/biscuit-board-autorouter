@@ -72,6 +72,12 @@ describe("fixed-via invariant", () => {
     solver.solve();
     expect(solver.solved).toBe(true);
 
+    const postProcessGraphics = solver
+      .getSolver("post-process-traces")
+      ?.visualize();
+    expect(postProcessGraphics?.title).toContain("trace simplification");
+    expect(postProcessGraphics?.rects?.length).toBeGreaterThan(0);
+    expect(postProcessGraphics?.circles?.length).toBeGreaterThan(0);
     const svg = getSvgFromGraphicsObject(solver.visualize(), {
       backgroundColor: "white",
       svgWidth: 900,
