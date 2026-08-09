@@ -36,6 +36,7 @@ export default function Repro02Page() {
             gridClearance: 0.1,
             maxRipsPerRoute: 1_000,
             maxTotalRips: 10_000,
+            routeOrder: "signal_longest_first",
           })
         }
         animationSpeed={30}

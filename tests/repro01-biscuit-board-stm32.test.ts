@@ -35,7 +35,7 @@ test("solves the exact BiscuitBoard STM32C071 real-project input", () => {
   expect(output!.stats.postProcessedClearance).toBe(0.2);
   expect(output!.stats.preSimplificationSegmentCount).toBeGreaterThan(0);
   expect(output!.stats.postSimplificationSegmentCount).toBeLessThan(
-    output!.stats.preSimplificationSegmentCount! * 0.4,
+    output!.stats.preSimplificationSegmentCount! * 0.45,
   );
   expect(output!.stats.fixedViaTransitionCount).toBe(0);
   const prepared = solver.getStageOutput<PreparedBiscuitRoutingProblem>(

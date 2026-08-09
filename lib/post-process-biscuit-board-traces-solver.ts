@@ -101,6 +101,9 @@ const obstacleAllowsSegment = (
   segment: TraceSegment,
 ) => {
   const obstacle = prepared.input.obstacles[obstacleIndex]!;
+  const prefabViaId = obstacle.connectedTo.find((identifier) =>
+    identifier.startsWith("pcb_via"),
+  );
   const identifiers = [
     context.demand.connectionName,
     context.demand.netId,
@@ -114,8 +117,9 @@ const obstacleAllowsSegment = (
   }
   return (
     obstacle.netIsAssignable === true &&
-    obstacleHasPcbViaId(obstacle) &&
-    traceTraversesObstacle(context.trace, obstacle) &&
+    Boolean(prefabViaId) &&
+    (traceTraversesObstacle(context.trace, obstacle) ||
+      context.trace.connectsTo?.includes(prefabViaId!)) &&
     (pointsEqual(segment.start, obstacle.center) ||
       pointsEqual(segment.end, obstacle.center))
   );

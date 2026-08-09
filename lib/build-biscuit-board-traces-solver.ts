@@ -41,10 +41,16 @@ const routeToTrace = (
   route: RoutedConnection,
 ): SimplifiedPcbTrace => {
   const demand = prepared.demandById.get(route.routeId)!;
-  const usedPrefabViaIds = route.edgePath.flatMap((edgeId) => {
-    const edge = prepared.edges[edgeId]!;
-    return edge.kind === "fixed_via_transition" ? [edge.prefabViaId] : [];
-  });
+  const usedPrefabViaIds = [
+    ...route.edgePath.flatMap((edgeId) => {
+      const edge = prepared.edges[edgeId]!;
+      return edge.kind === "fixed_via_transition" ? [edge.prefabViaId] : [];
+    }),
+    ...route.nodePath.flatMap((nodeIndex) => {
+      const prefabViaId = prepared.nodes[nodeIndex]!.prefabViaId;
+      return prefabViaId ? [prefabViaId] : [];
+    }),
+  ];
   const nodePath = collapseCollinearNodes(prepared, route.nodePath);
   const outputRoute: SimplifiedPcbTrace["route"] = [];
 

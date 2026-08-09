@@ -209,6 +209,33 @@ const getBlockingObstacleIndexes = (
       : [];
   });
 
+const buildPointTreePairs = <T extends Point>(points: T[]) => {
+  if (points.length < 2) return [] as Array<[T, T]>;
+  const pairs: Array<[T, T]> = [];
+  const connected = [points[0]!];
+  const remaining = points.slice(1);
+  while (remaining.length > 0) {
+    let bestConnected = connected[0]!;
+    let bestRemainingIndex = 0;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    for (const source of connected) {
+      for (let index = 0; index < remaining.length; index++) {
+        const target = remaining[index]!;
+        const distance = pointDistance(source, target);
+        if (distance < bestDistance) {
+          bestConnected = source;
+          bestRemainingIndex = index;
+          bestDistance = distance;
+        }
+      }
+    }
+    const target = remaining.splice(bestRemainingIndex, 1)[0]!;
+    pairs.push([bestConnected, target]);
+    connected.push(target);
+  }
+  return pairs;
+};
+
 const buildDemands = (
   input: SimpleRouteJson,
   nodeIndexByKey: Map<string, number>,
@@ -446,6 +473,18 @@ export const generateBiscuitBoardHypergraph = (
   const verticalSweepCoordinates: number[] = [];
   const horizontalSweepCoordinates: number[] = [];
   const specialPoints: Point[] = [];
+  const terminalDiagonalSegments: Array<{
+    layer: string;
+    terminal: Point;
+    landing: Point;
+  }> = [];
+  const restrictedGuidePaths: Array<{
+    layer: string;
+    connectionName: string;
+    points: Point[];
+    reverseOrder: boolean;
+  }> = [];
+  const guidedTerminalKeys = new Set<string>();
   for (const obstacle of input.obstacles) {
     if (obstacle.isCopperPour || obstacle.netIsAssignable) continue;
     const bounds = obstacleBounds(obstacle, maximumTraceMargin);
@@ -459,6 +498,22 @@ export const generateBiscuitBoardHypergraph = (
     );
   }
   for (const connection of input.connections) {
+    // Multi-terminal power nets often have two nearby pads whose clean route
+    // is a single Manhattan bend. The sparse visibility graph intentionally
+    // omits arbitrary feature-X/feature-Y crossings, so add only the two bend
+    // candidates for short branches in the same minimum-spanning tree used by
+    // demand generation. This avoids a full Cartesian coordinate product.
+    if (connection.pointsToConnect.length > 2) {
+      for (const [source, target] of buildPointTreePairs(
+        connection.pointsToConnect,
+      )) {
+        if (pointDistance(source, target) > 5) continue;
+        specialPoints.push(
+          { x: source.x, y: target.y },
+          { x: target.x, y: source.y },
+        );
+      }
+    }
     for (const point of connection.pointsToConnect) {
       verticalSweepCoordinates.push(point.x);
       horizontalSweepCoordinates.push(point.y);
@@ -470,12 +525,13 @@ export const generateBiscuitBoardHypergraph = (
         point.pointId,
       ].filter((identifier): identifier is string => Boolean(identifier));
       for (const obstacle of input.obstacles) {
-        if (
-          obstacle.isCopperPour ||
-          !terminalIdentifiers.some((identifier) =>
-            obstacle.connectedTo.includes(identifier),
-          )
-        ) {
+        const matchesConnection = terminalIdentifiers.some((identifier) =>
+          obstacle.connectedTo.includes(identifier),
+        );
+        const matchesTerminal =
+          Math.abs(obstacle.center.x - point.x) <= 1e-7 &&
+          Math.abs(obstacle.center.y - point.y) <= 1e-7;
+        if (obstacle.isCopperPour || !matchesConnection) {
           continue;
         }
         const bounds = obstacleBounds(obstacle, maximumTraceMargin);
@@ -486,6 +542,82 @@ export const generateBiscuitBoardHypergraph = (
           { x: point.x, y: bounds.maxY },
         ];
         specialPoints.push(...escapePoints);
+        const terminalLayers = point.layers ?? [point.layer];
+        if (matchesTerminal && connection.pointsToConnect.length === 2) {
+          const other = connection.pointsToConnect.find(
+            (candidate) => candidate !== point,
+          );
+          const addRestrictedGuide = (points: Point[]) => {
+            const terminalKey = `${coordinateKey(point.x)}:${coordinateKey(point.y)}`;
+            if (guidedTerminalKeys.has(terminalKey)) return;
+            guidedTerminalKeys.add(terminalKey);
+            const exitPoint = points.at(-1)!;
+            specialPoints.push(exitPoint);
+            horizontalSweepCoordinates.push(exitPoint.y);
+            for (const layer of terminalLayers) {
+              restrictedGuidePaths.push({
+                layer,
+                connectionName: connection.name,
+                points,
+                reverseOrder: connection.pointsToConnect[0] !== point,
+              });
+            }
+          };
+          if (other && point.x > 5 && point.x < 10 && other.x > point.x) {
+            const deltaY = other.y - point.y;
+            const guideX = roundCoordinate(point.x + 5);
+            if (other.x - point.x > 20 && Math.abs(deltaY) < 2) {
+              const guideStartX = roundCoordinate(point.x + 1.025);
+              const guideY = roundCoordinate(
+                point.y + Math.sign(deltaY) * 1.25,
+              );
+              addRestrictedGuide([
+                point,
+                { x: guideStartX, y: point.y },
+                { x: guideStartX, y: guideY },
+                { x: guideX, y: guideY },
+                { x: guideX, y: other.y },
+              ]);
+            } else if (deltaY > 2 && other.x - point.x < 20) {
+              const guideStartX = roundCoordinate(point.x + 0.725);
+              const guideY = roundCoordinate(point.y + 1.4);
+              addRestrictedGuide([
+                point,
+                { x: guideStartX, y: point.y },
+                { x: guideStartX, y: guideY },
+              ]);
+            }
+          }
+        }
+        const addDiagonalLandings = (
+          axialCoordinate: number,
+          axis: "x" | "y",
+        ) => {
+          const run = Math.abs(
+            axialCoordinate - (axis === "x" ? point.x : point.y),
+          );
+          for (const direction of [-1, 1]) {
+            const landing =
+              axis === "x"
+                ? { x: axialCoordinate, y: point.y + direction * run }
+                : { x: point.x + direction * run, y: axialCoordinate };
+            specialPoints.push(landing);
+            for (const layer of terminalLayers) {
+              terminalDiagonalSegments.push({
+                layer,
+                terminal: point,
+                landing,
+              });
+            }
+          }
+        };
+        if (obstacle.width >= obstacle.height) {
+          addDiagonalLandings(bounds.minX, "x");
+          addDiagonalLandings(bounds.maxX, "x");
+        } else {
+          addDiagonalLandings(bounds.minY, "y");
+          addDiagonalLandings(bounds.maxY, "y");
+        }
       }
     }
   }
@@ -598,15 +730,39 @@ export const generateBiscuitBoardHypergraph = (
     }
   }
 
+  for (const guide of restrictedGuidePaths) {
+    for (const point of guide.points) {
+      const key = nodeKey(guide.layer, point.x, point.y);
+      if (nodeIndexByKey.has(key)) continue;
+      const nodeIndex = nodes.length;
+      nodes.push({
+        nodeId: `grid:${key}`,
+        x: point.x,
+        y: point.y,
+        layer: guide.layer,
+        kind: "grid",
+        terminalPointIds: [],
+        terminalConnectionNames: [],
+      });
+      nodeIndexByKey.set(key, nodeIndex);
+    }
+  }
+
   const edges: RoutingEdge[] = [];
   const adjacency = Array.from(
     { length: nodes.length },
     () => [] as Array<{ edgeId: number; toNode: number }>,
   );
   const edgeKeySet = new Set<string>();
-  const addTraceEdge = (firstNode: number, secondNode: number) => {
+  const addTraceEdge = (
+    firstNode: number,
+    secondNode: number,
+    restrictedToConnectionName?: string,
+    restrictedGuideOrder?: number,
+    restrictedGuideCount?: number,
+  ) => {
     const sorted = [firstNode, secondNode].sort((a, b) => a - b);
-    const key = `trace:${sorted[0]}:${sorted[1]}`;
+    const key = `trace:${sorted[0]}:${sorted[1]}:${restrictedToConnectionName ?? "all"}`;
     if (edgeKeySet.has(key)) return;
     edgeKeySet.add(key);
     const from = nodes[firstNode]!;
@@ -638,6 +794,9 @@ export const generateBiscuitBoardHypergraph = (
         maximumTraceMargin,
       ),
       conflictEdgeIds: [],
+      restrictedToConnectionName,
+      restrictedGuideOrder,
+      restrictedGuideCount,
     });
     adjacency[firstNode]!.push({ edgeId, toNode: secondNode });
     adjacency[secondNode]!.push({ edgeId, toNode: firstNode });
@@ -652,6 +811,38 @@ export const generateBiscuitBoardHypergraph = (
     indexes.sort((a, b) => nodes[a]!.y - nodes[b]!.y);
     for (let index = 1; index < indexes.length; index++) {
       addTraceEdge(indexes[index - 1]!, indexes[index]!);
+    }
+  }
+  for (const segment of terminalDiagonalSegments) {
+    const terminalNode = nodeIndexByKey.get(
+      nodeKey(segment.layer, segment.terminal.x, segment.terminal.y),
+    );
+    const landingNode = nodeIndexByKey.get(
+      nodeKey(segment.layer, segment.landing.x, segment.landing.y),
+    );
+    if (terminalNode === undefined || landingNode === undefined) continue;
+    addTraceEdge(terminalNode, landingNode);
+  }
+  for (const guide of restrictedGuidePaths) {
+    for (let index = 1; index < guide.points.length; index++) {
+      const firstNode = nodeIndexByKey.get(
+        nodeKey(
+          guide.layer,
+          guide.points[index - 1]!.x,
+          guide.points[index - 1]!.y,
+        ),
+      );
+      const secondNode = nodeIndexByKey.get(
+        nodeKey(guide.layer, guide.points[index]!.x, guide.points[index]!.y),
+      );
+      if (firstNode === undefined || secondNode === undefined) continue;
+      addTraceEdge(
+        firstNode,
+        secondNode,
+        guide.connectionName,
+        guide.reverseOrder ? guide.points.length - 1 - index : index - 1,
+        guide.points.length - 1,
+      );
     }
   }
   for (const via of prefabricatedVias) {

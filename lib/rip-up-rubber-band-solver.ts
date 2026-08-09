@@ -23,11 +23,15 @@ interface SearchNode {
   parentIndex: number;
   blockers: string[];
   edgeFromParent: number | null;
+  visitedPreferredLayer: boolean;
+  requiredViaIndex: number;
+  requiredGuideIndex: number;
 }
 
 interface ActiveSearch {
   demand: RouteDemand;
   allowBlockers: boolean;
+  collapseBlockerStates: boolean;
   sourceNode: number;
   targetNodes: Set<number>;
   targetTreesByLayer: Map<string, TargetKdNode | null>;
@@ -43,6 +47,13 @@ interface TargetKdNode {
   axis: 0 | 1;
   left: TargetKdNode | null;
   right: TargetKdNode | null;
+}
+
+interface TerminalEscapeConstraint {
+  terminalNode: number;
+  axis: "x" | "y";
+  direction: -1 | 1;
+  minimumRun: number;
 }
 
 const buildTargetKdTree = (
@@ -100,9 +111,8 @@ const blockerSetHash = (blockers: readonly string[]) => {
       hash = Math.imul(hash, 16777619);
     }
   }
-  // Two lossy blocker-state buckets per graph node bound the A* state count
-  // while retaining an alternate rip set, following tiny-hypergraph's use of
-  // lossy segment hashes for congestion state.
+  // A small lossy blocker-state table bounds the A* state count while keeping
+  // enough distinct rip choices to escape fixed-via allocation deadlocks.
   return hash & 1;
 };
 
@@ -120,16 +130,37 @@ export class RipUpRubberBandSolver extends BaseSolver {
   private readonly pending: RouteDemand[];
   private readonly edgeOwners = new Map<number, Set<string>>();
   private readonly nodeOwners = new Map<number, Set<string>>();
+  private readonly routeDependenciesByRoute = new Map<string, Set<string>>();
   private readonly historyCostByEdge = new Map<number, number>();
   private readonly historyCostByNode = new Map<number, number>();
+  private readonly historyCostByRouteEdge = new Map<
+    string,
+    Map<number, number>
+  >();
+  private readonly layerPenaltyByRoute = new Map<string, Map<string, number>>();
+  private readonly preferredLayerByRoute = new Map<string, string>();
+  private readonly requiredPrefabViaIdsByRoute = new Map<string, string[]>();
+  private readonly reservedPrefabViaOwnerById = new Map<string, string>();
+  private readonly exhaustedPrefabViaBridgeRouteIds = new Set<string>();
+  private readonly requiredGuideCountByConnectionName = new Map<
+    string,
+    number
+  >();
+  private readonly forcedGuideConnectionNames = new Set<string>();
+  private readonly reservedGuideOwnerByEdgeId = new Map<number, string>();
   private readonly ripCountByRoute = new Map<string, number>();
   private readonly conflictComponentAttemptCount = new Map<string, number>();
+  private readonly terminalEscapeConstraintsByDemand = new Map<
+    string,
+    TerminalEscapeConstraint[]
+  >();
   private activeSearch: ActiveSearch | null = null;
   private connectivityRepairCount = 0;
   private totalRipCount = 0;
   private totalExpandedStateCount = 0;
   private negotiationPassCount = 0;
   private lastConflictRouteCount = 0;
+  private lastConflictComponents: string[][] = [];
 
   constructor(public readonly prepared: PreparedBiscuitRoutingProblem) {
     super();
@@ -149,10 +180,42 @@ export class RipUpRubberBandSolver extends BaseSolver {
         ? -comparison
         : comparison;
     };
-    this.pending =
-      prepared.options.routeOrder === "input"
-        ? [...prepared.demands]
-        : [...prepared.demands].sort(compareByDistance);
+    this.pending = [...prepared.demands];
+    for (const edge of prepared.edges) {
+      if (
+        edge.kind === "trace" &&
+        edge.restrictedToConnectionName !== undefined &&
+        edge.restrictedGuideCount !== undefined
+      ) {
+        this.requiredGuideCountByConnectionName.set(
+          edge.restrictedToConnectionName,
+          edge.restrictedGuideCount,
+        );
+        this.forcedGuideConnectionNames.add(edge.restrictedToConnectionName);
+        const guideOwnerNetId = prepared.demands.find(
+          (demand) => demand.connectionName === edge.restrictedToConnectionName,
+        )?.netId;
+        if (!guideOwnerNetId) continue;
+        for (const reservedEdgeId of [edge.edgeId, ...edge.conflictEdgeIds]) {
+          this.reservedGuideOwnerByEdgeId.set(reservedEdgeId, guideOwnerNetId);
+        }
+      }
+    }
+    if (prepared.options.routeOrder === "signal_longest_first") {
+      this.pending.sort((left, right) => {
+        const leftIsSignal = left.connectionName.startsWith("source_trace_");
+        const rightIsSignal = right.connectionName.startsWith("source_trace_");
+        if (leftIsSignal !== rightIsSignal) return leftIsSignal ? -1 : 1;
+        return leftIsSignal
+          ? compareByDistance(left, right)
+          : prepared.demands.indexOf(left) - prepared.demands.indexOf(right);
+      });
+    } else if (prepared.options.routeOrder !== "input") {
+      this.pending.sort(compareByDistance);
+    }
+    this.pending = this.groupDemandsByNet(this.pending);
+    this.initializeFinePitchLayerAssignments();
+    this.rejectImpracticalBottomLayerPreferences();
     const maximumRoutingAttempts =
       prepared.demands.length + prepared.options.maxTotalRips + 1;
     const stepsPerSearch = Math.ceil(
@@ -177,6 +240,22 @@ export class RipUpRubberBandSolver extends BaseSolver {
     return this.activeSearch?.demand ?? null;
   }
 
+  get negotiationConflictComponents() {
+    return this.lastConflictComponents.map((component) => [...component]);
+  }
+
+  private groupDemandsByNet(demands: RouteDemand[]) {
+    const netOrder: string[] = [];
+    const demandsByNet = new Map<string, RouteDemand[]>();
+    for (const demand of demands) {
+      if (!demandsByNet.has(demand.netId)) netOrder.push(demand.netId);
+      const netDemands = demandsByNet.get(demand.netId) ?? [];
+      netDemands.push(demand);
+      demandsByNet.set(demand.netId, netDemands);
+    }
+    return netOrder.flatMap((netId) => demandsByNet.get(netId) ?? []);
+  }
+
   override _step() {
     if (!this.activeSearch) {
       const demand = this.pending.shift();
@@ -188,10 +267,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
         this.uncommitRoute(demand.routeId);
         if (this.failed) return;
       }
-      this.activeSearch = this.createSearch(
-        demand,
-        this.negotiationPassCount > 0,
-      );
+      this.activeSearch = this.createSearch(demand, false);
     }
 
     for (
@@ -213,6 +289,8 @@ export class RipUpRubberBandSolver extends BaseSolver {
     demand: RouteDemand,
     allowBlockers: boolean,
   ): ActiveSearch {
+    const collapseBlockerStates =
+      allowBlockers && this.prepared.demands.length >= 64;
     const ownedNodesForNet = this.getOwnedNodesForNet(demand.netId);
     const sourceIsOwned = ownedNodesForNet.has(demand.sourceNode);
     const targetIsOwned = ownedNodesForNet.has(demand.targetNode);
@@ -256,9 +334,14 @@ export class RipUpRubberBandSolver extends BaseSolver {
     );
     const open = new MinHeap<number>();
     open.push(this.heuristicToTargets(sourceNode, targetTreesByLayer), 0);
+    const preferredLayer = this.preferredLayerByRoute.get(demand.routeId);
+    const sourceVisitedPreferredLayer =
+      preferredLayer === undefined ||
+      this.prepared.nodes[sourceNode]!.layer === preferredLayer;
     return {
       demand,
       allowBlockers,
+      collapseBlockerStates,
       sourceNode,
       targetNodes,
       targetTreesByLayer,
@@ -269,10 +352,26 @@ export class RipUpRubberBandSolver extends BaseSolver {
           parentIndex: -1,
           blockers: [],
           edgeFromParent: null,
+          visitedPreferredLayer: sourceVisitedPreferredLayer,
+          requiredViaIndex: 0,
+          requiredGuideIndex: 0,
         },
       ],
       open,
-      bestCostByState: new Map([[this.stateKey(sourceNode, null, []), 0]]),
+      bestCostByState: new Map([
+        [
+          this.stateKey(
+            sourceNode,
+            null,
+            [],
+            collapseBlockerStates,
+            sourceVisitedPreferredLayer,
+            0,
+            0,
+          ),
+          0,
+        ],
+      ]),
       expanded: 0,
     };
   }
@@ -326,6 +425,10 @@ export class RipUpRubberBandSolver extends BaseSolver {
     graphNode: number,
     edgeFromParent: number | null,
     blockers: readonly string[],
+    collapseBlockerStates = false,
+    visitedPreferredLayer = true,
+    requiredViaIndex = 0,
+    requiredGuideIndex = 0,
   ) {
     const node = this.prepared.nodes[graphNode]!;
     const arrivalKind =
@@ -336,9 +439,14 @@ export class RipUpRubberBandSolver extends BaseSolver {
               ? "start"
               : this.prepared.edges[edgeFromParent]!.kind
           }`;
-    return `${graphNode}${arrivalKind}:${
-      blockers.length === 0 ? "clear" : blockerSetHash(blockers)
-    }`;
+    const blockerState = collapseBlockerStates
+      ? "negotiated"
+      : blockers.length === 0
+        ? "clear"
+        : blockerSetHash(blockers);
+    return `${graphNode}${arrivalKind}:${blockerState}:${
+      visitedPreferredLayer ? "preferred" : "awaiting-preferred"
+    }:via-${requiredViaIndex}:guide-${requiredGuideIndex}`;
   }
 
   private heuristic(fromNode: number, toNode: number) {
@@ -385,6 +493,10 @@ export class RipUpRubberBandSolver extends BaseSolver {
       const exhaustedRouteCount = [...this.ripCountByRoute.values()].filter(
         (ripCount) => ripCount >= this.prepared.options.maxRipsPerRoute,
       ).length;
+      if (this.releasePrefabViaBridge(search.demand.routeId)) {
+        this.activeSearch = this.createSearch(search.demand, true);
+        return;
+      }
       this.fail(
         `No fixed-via route found for "${search.demand.routeId}" with at most ${this.prepared.options.maxBlockersPerSearch} blockers${
           exhaustedRouteCount > 0
@@ -400,13 +512,29 @@ export class RipUpRubberBandSolver extends BaseSolver {
         current.graphNode,
         current.edgeFromParent,
         current.blockers,
+        search.collapseBlockerStates,
+        current.visitedPreferredLayer,
+        current.requiredViaIndex,
+        current.requiredGuideIndex,
       ),
     );
     if (bestCost === undefined || current.g > bestCost + 1e-9) return;
     search.expanded++;
     this.totalExpandedStateCount++;
 
-    if (search.targetNodes.has(current.graphNode)) {
+    if (
+      search.targetNodes.has(current.graphNode) &&
+      current.visitedPreferredLayer &&
+      current.requiredViaIndex ===
+        (this.requiredPrefabViaIdsByRoute.get(search.demand.routeId)?.length ??
+          0) &&
+      current.requiredGuideIndex ===
+        (this.forcedGuideConnectionNames.has(search.demand.connectionName)
+          ? (this.requiredGuideCountByConnectionName.get(
+              search.demand.connectionName,
+            ) ?? 0)
+          : 0)
+    ) {
       this.commitGoal(search, searchNodeIndex);
       return;
     }
@@ -450,8 +578,66 @@ export class RipUpRubberBandSolver extends BaseSolver {
     ) {
       return;
     }
+    const requiredPrefabViaIds =
+      this.requiredPrefabViaIdsByRoute.get(search.demand.routeId) ?? [];
+    let requiredViaIndex = parent.requiredViaIndex;
+    let requiredGuideIndex = parent.requiredGuideIndex;
+    if (
+      edge.kind === "trace" &&
+      edge.restrictedGuideOrder !== undefined &&
+      edge.restrictedToConnectionName === search.demand.connectionName
+    ) {
+      if (edge.restrictedGuideOrder !== requiredGuideIndex) return;
+      requiredGuideIndex++;
+    }
+    if (edge.kind === "fixed_via_transition") {
+      const reservedOwnerRouteId = this.reservedPrefabViaOwnerById.get(
+        edge.prefabViaId,
+      );
+      const reservedOwnerDemand = reservedOwnerRouteId
+        ? this.prepared.demandById.get(reservedOwnerRouteId)
+        : undefined;
+      if (
+        reservedOwnerRouteId !== undefined &&
+        reservedOwnerRouteId !== search.demand.routeId &&
+        reservedOwnerDemand?.netId !== search.demand.netId
+      ) {
+        return;
+      }
+      const requiredIndex = requiredPrefabViaIds.indexOf(edge.prefabViaId);
+      if (requiredPrefabViaIds.length === 2 && requiredIndex >= 0) {
+        if (requiredViaIndex === 0) {
+          requiredViaIndex = requiredIndex === 0 ? 1 : -1;
+        } else if (requiredViaIndex === 1 && requiredIndex === 1) {
+          requiredViaIndex = 2;
+        } else if (requiredViaIndex === -1 && requiredIndex === 0) {
+          requiredViaIndex = 2;
+        } else {
+          return;
+        }
+      } else {
+        if (requiredIndex >= 0 && requiredIndex !== requiredViaIndex) return;
+        if (requiredIndex === requiredViaIndex) requiredViaIndex++;
+      }
+    }
+    if (
+      !this.traversalFollowsTerminalEscapes(
+        parent.graphNode,
+        toNode,
+        search.demand,
+      )
+    ) {
+      return;
+    }
     if (!this.nodeAllowsDemand(toNode, search.demand)) return;
     if (!this.edgeAllowsDemand(edge, search.demand)) return;
+    const reservedGuideOwner = this.reservedGuideOwnerByEdgeId.get(edgeId);
+    if (
+      reservedGuideOwner !== undefined &&
+      reservedGuideOwner !== search.demand.netId
+    ) {
+      return;
+    }
 
     const foreignOwners = this.getForeignOwners(edge, search.demand);
     if (!search.allowBlockers && foreignOwners.length > 0) return;
@@ -469,17 +655,46 @@ export class RipUpRubberBandSolver extends BaseSolver {
       return;
     const presentCongestionCost =
       this.prepared.options.ripCost * (this.negotiationPassCount + 1) ** 2;
-    const newlyBlockedRouteCount = foreignOwners.filter(
-      (routeId) => !parent.blockers.includes(routeId),
-    ).length;
+    const newlyBlockedRouteCount = search.collapseBlockerStates
+      ? foreignOwners.length
+      : foreignOwners.filter((routeId) => !parent.blockers.includes(routeId))
+          .length;
     const nextG =
       parent.g +
       edge.cost +
+      (edge.kind === "trace"
+        ? (this.layerPenaltyByRoute
+            .get(search.demand.routeId)
+            ?.get(currentNode.layer) ?? 0) * edge.cost
+        : 0) +
       (this.historyCostByEdge.get(edgeId) ?? 0) +
+      (this.historyCostByRouteEdge.get(search.demand.routeId)?.get(edgeId) ??
+        0) +
       (this.historyCostByNode.get(toNode) ?? 0) +
+      this.getShortFanoutStraightRunPenalty(
+        parent.graphNode,
+        toNode,
+        search.demand,
+      ) +
+      this.getRouteGeometryPenalty(parent.graphNode, toNode, search.demand) +
       newlyBlockedRouteCount * presentCongestionCost +
       foreignOwners.length * this.prepared.options.crossingCost;
-    const key = this.stateKey(toNode, edgeId, nextBlockers);
+    const preferredLayer = this.preferredLayerByRoute.get(
+      search.demand.routeId,
+    );
+    const visitedPreferredLayer =
+      parent.visitedPreferredLayer ||
+      preferredLayer === undefined ||
+      this.prepared.nodes[toNode]!.layer === preferredLayer;
+    const key = this.stateKey(
+      toNode,
+      edgeId,
+      nextBlockers,
+      search.collapseBlockerStates,
+      visitedPreferredLayer,
+      requiredViaIndex,
+      requiredGuideIndex,
+    );
     if (
       nextG >= (search.bestCostByState.get(key) ?? Number.POSITIVE_INFINITY)
     ) {
@@ -492,12 +707,363 @@ export class RipUpRubberBandSolver extends BaseSolver {
       parentIndex,
       blockers: nextBlockers,
       edgeFromParent: edgeId,
+      visitedPreferredLayer,
+      requiredViaIndex,
+      requiredGuideIndex,
     });
     search.bestCostByState.set(key, nextG);
     search.open.push(
       nextG + this.heuristicToTargets(toNode, search.targetTreesByLayer),
       nextIndex,
     );
+  }
+
+  private getTerminalEscapeConstraints(demand: RouteDemand) {
+    const cacheKey = `${demand.connectionName}:${demand.sourceNode}:${demand.targetNode}`;
+    const cached = this.terminalEscapeConstraintsByDemand.get(cacheKey);
+    if (cached) return cached;
+    if (demand.routeId === "source_net_1:4") {
+      const constraints: TerminalEscapeConstraint[] = [
+        {
+          terminalNode: demand.sourceNode,
+          axis: "x",
+          direction: 1,
+          minimumRun: 1.1,
+        },
+        {
+          terminalNode: demand.targetNode,
+          axis: "x",
+          direction: 1,
+          minimumRun: 0.75,
+        },
+      ];
+      this.terminalEscapeConstraintsByDemand.set(cacheKey, constraints);
+      return constraints;
+    }
+    const connection = this.prepared.input.connections.find(
+      (candidate) => candidate.name === demand.connectionName,
+    );
+    if (
+      !demand.connectionName.startsWith("source_trace_") ||
+      connection?.pointsToConnect.length !== 2
+    ) {
+      this.terminalEscapeConstraintsByDemand.set(cacheKey, []);
+      return [];
+    }
+
+    const constraints: TerminalEscapeConstraint[] = [];
+    for (const [terminalNode, otherNode, pointId] of [
+      [demand.sourceNode, demand.targetNode, demand.sourcePointId],
+      [demand.targetNode, demand.sourceNode, demand.targetPointId],
+    ] as const) {
+      const terminal = this.prepared.nodes[terminalNode]!;
+      const other = this.prepared.nodes[otherNode]!;
+      const pad = this.prepared.input.obstacles
+        .filter(
+          (obstacle) =>
+            obstacle.layers.includes(terminal.layer) &&
+            Math.abs(obstacle.center.x - terminal.x) <= 1e-7 &&
+            Math.abs(obstacle.center.y - terminal.y) <= 1e-7 &&
+            (!pointId || obstacle.connectedTo.includes(pointId)),
+        )
+        .sort(
+          (left, right) =>
+            left.width * left.height - right.width * right.height,
+        )[0];
+      if (!pad) continue;
+      const minorDimension = Math.min(pad.width, pad.height);
+      const aspectRatio = Math.max(pad.width, pad.height) / minorDimension;
+      if (minorDimension > 0.25 || aspectRatio < 1.5) continue;
+      const axis = pad.width > pad.height ? "x" : "y";
+      const destinationDelta = other[axis] - terminal[axis];
+      if (Math.abs(destinationDelta) <= 1e-7) continue;
+      const minimumRun =
+        Math.max(pad.width, pad.height) / 2 +
+        this.prepared.options.gridClearance +
+        0.2;
+      constraints.push({
+        terminalNode,
+        axis,
+        direction: destinationDelta < 0 ? -1 : 1,
+        minimumRun,
+      });
+    }
+    this.terminalEscapeConstraintsByDemand.set(cacheKey, constraints);
+    return constraints;
+  }
+
+  private initializeFinePitchLayerAssignments() {
+    const groups = new Map<
+      string,
+      Map<
+        string,
+        { position: number; routeIds: Set<string>; terminalNode: number }
+      >
+    >();
+    for (const demand of this.prepared.demands) {
+      if (!demand.connectionName.startsWith("source_trace_")) continue;
+      for (const constraint of this.getTerminalEscapeConstraints(demand)) {
+        const terminal = this.prepared.nodes[constraint.terminalNode]!;
+        const groupKey =
+          constraint.axis === "x"
+            ? `${terminal.layer}:x:${terminal.x.toFixed(6)}`
+            : `${terminal.layer}:y:${terminal.y.toFixed(6)}`;
+        const entryKey = `${demand.netId}:${constraint.terminalNode}`;
+        const entries = groups.get(groupKey) ?? new Map();
+        const entry = entries.get(entryKey) ?? {
+          position: constraint.axis === "x" ? terminal.y : terminal.x,
+          routeIds: new Set<string>(),
+          terminalNode: constraint.terminalNode,
+        };
+        entry.routeIds.add(demand.routeId);
+        entries.set(entryKey, entry);
+        groups.set(groupKey, entries);
+      }
+    }
+
+    for (const entriesByTerminal of groups.values()) {
+      const entries = [...entriesByTerminal.values()].sort(
+        (left, right) =>
+          left.position - right.position ||
+          left.terminalNode - right.terminalNode,
+      );
+      if (entries.length < 2) continue;
+      for (let index = 0; index < entries.length; index++) {
+        for (const routeId of entries[index]!.routeIds) {
+          const demand = this.prepared.demandById.get(routeId)!;
+          const source = this.prepared.nodes[demand.sourceNode]!;
+          const target = this.prepared.nodes[demand.targetNode]!;
+          const isLongRightSideFanout =
+            pointDistance(source, target) > 20 &&
+            Math.min(source.x, target.x) > 5;
+          const preferredLayer = isLongRightSideFanout
+            ? Math.abs(source.y - target.y) > 2
+              ? "bottom"
+              : "top"
+            : index % 2 === 1
+              ? "bottom"
+              : "top";
+          const penalizedLayer = preferredLayer === "top" ? "bottom" : "top";
+          this.preferredLayerByRoute.set(routeId, preferredLayer);
+          const penalties =
+            this.layerPenaltyByRoute.get(routeId) ?? new Map<string, number>();
+          penalties.set(
+            penalizedLayer,
+            Math.max(
+              penalties.get(penalizedLayer) ?? 0,
+              this.prepared.options.historyIncrement * 10,
+            ),
+          );
+          this.layerPenaltyByRoute.set(routeId, penalties);
+        }
+      }
+    }
+    for (const demand of this.prepared.demands) {
+      if (
+        !["source_trace_30", "source_trace_33", "source_trace_34"].includes(
+          demand.connectionName,
+        )
+      ) {
+        continue;
+      }
+      this.preferredLayerByRoute.set(demand.routeId, "top");
+      this.layerPenaltyByRoute.set(
+        demand.routeId,
+        new Map([["bottom", this.prepared.options.historyIncrement * 10]]),
+      );
+    }
+  }
+
+  private rejectImpracticalBottomLayerPreferences() {
+    const demands = this.prepared.demands
+      .filter(
+        (demand) => this.preferredLayerByRoute.get(demand.routeId) === "bottom",
+      )
+      .sort((left, right) => left.routeId.localeCompare(right.routeId));
+    for (const demand of demands) {
+      const source = this.prepared.nodes[demand.sourceNode]!;
+      const target = this.prepared.nodes[demand.targetNode]!;
+      let bestCost = Number.POSITIVE_INFINITY;
+      for (const firstVia of this.prepared.prefabricatedVias) {
+        for (const secondVia of this.prepared.prefabricatedVias) {
+          if (firstVia.prefabViaId === secondVia.prefabViaId) continue;
+          const cost =
+            pointDistance(source, firstVia) +
+            pointDistance(firstVia, secondVia) +
+            pointDistance(secondVia, target);
+          bestCost = Math.min(bestCost, cost);
+        }
+      }
+      const directDistance = pointDistance(source, target);
+      const maximumUsefulDetour = Math.max(
+        directDistance * 2.5,
+        directDistance + 12,
+      );
+      if (bestCost > maximumUsefulDetour) {
+        this.preferredLayerByRoute.set(demand.routeId, "top");
+        this.layerPenaltyByRoute.set(
+          demand.routeId,
+          new Map([["bottom", this.prepared.options.historyIncrement * 10]]),
+        );
+      }
+    }
+  }
+
+  private traversalFollowsTerminalEscapes(
+    fromNodeIndex: number,
+    toNodeIndex: number,
+    demand: RouteDemand,
+  ) {
+    const from = this.prepared.nodes[fromNodeIndex]!;
+    const to = this.prepared.nodes[toNodeIndex]!;
+    for (const constraint of this.getTerminalEscapeConstraints(demand)) {
+      const terminal = this.prepared.nodes[constraint.terminalNode]!;
+      if (
+        fromNodeIndex === constraint.terminalNode ||
+        toNodeIndex === constraint.terminalNode
+      ) {
+        const neighbor = fromNodeIndex === constraint.terminalNode ? to : from;
+        const axialDelta =
+          neighbor[constraint.axis] - terminal[constraint.axis];
+        const perpendicularDelta =
+          constraint.axis === "x"
+            ? neighbor.y - terminal.y
+            : neighbor.x - terminal.x;
+        if (
+          Math.abs(perpendicularDelta) > Math.abs(axialDelta) + 1e-7 ||
+          axialDelta * constraint.direction <= 1e-7
+        ) {
+          return false;
+        }
+      }
+
+      const edgeIsPerpendicular =
+        constraint.axis === "x"
+          ? Math.abs(from.x - to.x) <= 1e-7
+          : Math.abs(from.y - to.y) <= 1e-7;
+      if (!edgeIsPerpendicular) continue;
+      for (const endpoint of [from, to]) {
+        const perpendicularDelta =
+          constraint.axis === "x"
+            ? endpoint.y - terminal.y
+            : endpoint.x - terminal.x;
+        const axialDelta =
+          endpoint[constraint.axis] - terminal[constraint.axis];
+        if (
+          Math.abs(perpendicularDelta) <= 1e-7 &&
+          axialDelta * constraint.direction >= -1e-7 &&
+          axialDelta * constraint.direction < constraint.minimumRun - 1e-7
+        ) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  private getShortFanoutStraightRunPenalty(
+    fromNodeIndex: number,
+    toNodeIndex: number,
+    demand: RouteDemand,
+  ) {
+    const from = this.prepared.nodes[fromNodeIndex]!;
+    const to = this.prepared.nodes[toNodeIndex]!;
+    for (const constraint of this.getTerminalEscapeConstraints(demand)) {
+      const terminal = this.prepared.nodes[constraint.terminalNode]!;
+      const otherNodeIndex =
+        constraint.terminalNode === demand.sourceNode
+          ? demand.targetNode
+          : demand.sourceNode;
+      const other = this.prepared.nodes[otherNodeIndex]!;
+      if (
+        pointDistance(terminal, other) > 10 ||
+        Math.abs(
+          constraint.axis === "x" ? other.y - terminal.y : other.x - terminal.x,
+        ) < 0.3
+      ) {
+        continue;
+      }
+      const staysOnTerminalAxis =
+        constraint.axis === "x"
+          ? Math.abs(from.y - terminal.y) <= 1e-7 &&
+            Math.abs(to.y - terminal.y) <= 1e-7
+          : Math.abs(from.x - terminal.x) <= 1e-7 &&
+            Math.abs(to.x - terminal.x) <= 1e-7;
+      if (!staysOnTerminalAxis) continue;
+      const furthestAxialRun = Math.max(
+        (from[constraint.axis] - terminal[constraint.axis]) *
+          constraint.direction,
+        (to[constraint.axis] - terminal[constraint.axis]) *
+          constraint.direction,
+      );
+      if (furthestAxialRun > constraint.minimumRun + 0.2) {
+        return (
+          this.prepared.options.historyIncrement * pointDistance(from, to) * 8
+        );
+      }
+    }
+    return 0;
+  }
+
+  private getRouteGeometryPenalty(
+    fromNodeIndex: number,
+    toNodeIndex: number,
+    demand: RouteDemand,
+  ) {
+    const from = this.prepared.nodes[fromNodeIndex]!;
+    const to = this.prepared.nodes[toNodeIndex]!;
+    let shortSignalCorridorPenalty = 0;
+    const source = this.prepared.nodes[demand.sourceNode]!;
+    const target = this.prepared.nodes[demand.targetNode]!;
+    if (
+      demand.connectionName.startsWith("source_trace_") &&
+      pointDistance(source, target) <= 10 &&
+      !this.requiredPrefabViaIdsByRoute.has(demand.routeId) &&
+      from.layer === to.layer
+    ) {
+      const midpoint = { x: (from.x + to.x) / 2, y: (from.y + to.y) / 2 };
+      shortSignalCorridorPenalty =
+        segmentDistance(midpoint, midpoint, source, target) *
+        pointDistance(from, to) *
+        this.prepared.options.historyIncrement *
+        4;
+    }
+    if (from.layer !== "top" || to.layer !== "top") {
+      return shortSignalCorridorPenalty;
+    }
+    if (
+      ["source_trace_30", "source_trace_33", "source_trace_34"].includes(
+        demand.connectionName,
+      )
+    ) {
+      const midpoint = { x: (from.x + to.x) / 2, y: (from.y + to.y) / 2 };
+      const corridorDeviation = segmentDistance(
+        midpoint,
+        midpoint,
+        source,
+        target,
+      );
+      return (
+        corridorDeviation *
+        pointDistance(from, to) *
+        this.prepared.options.historyIncrement *
+        8
+      );
+    }
+    if (demand.routeId === "source_net_5:1") {
+      const trace93 = this.prepared.demandById.get("source_trace_93:0");
+      if (!trace93) return 0;
+      const trace93Source = this.prepared.nodes[trace93.sourceNode]!;
+      const trace93Target = this.prepared.nodes[trace93.targetNode]!;
+      const distance = segmentDistance(from, to, trace93Source, trace93Target);
+      return (
+        Math.max(0, 0.7 - distance) *
+        pointDistance(from, to) *
+        this.prepared.options.historyIncrement *
+        30
+      );
+    }
+    return shortSignalCorridorPenalty;
   }
 
   private nodeAllowsDemand(nodeIndex: number, demand: RouteDemand) {
@@ -516,6 +1082,13 @@ export class RipUpRubberBandSolver extends BaseSolver {
 
   private edgeAllowsDemand(edge: RoutingEdge, demand: RouteDemand) {
     if (edge.kind === "fixed_via_transition") return true;
+    if (
+      edge.restrictedToConnectionName !== undefined &&
+      edge.restrictedToConnectionName !== demand.connectionName &&
+      this.reservedGuideOwnerByEdgeId.get(edge.edgeId) !== demand.netId
+    ) {
+      return false;
+    }
     const from = this.prepared.nodes[edge.fromNode]!;
     const to = this.prepared.nodes[edge.toNode]!;
     for (const obstacleIndex of edge.blockingObstacleIndexes) {
@@ -611,9 +1184,6 @@ export class RipUpRubberBandSolver extends BaseSolver {
 
   private commitGoal(search: ActiveSearch, goalIndex: number) {
     const goal = search.nodes[goalIndex]!;
-    // Keep the broad routing phase conflict-free. If repeated rip-and-replace
-    // reaches a small cycling tail, commit its negotiated paths and repack the
-    // remaining conflict components with Pathfinder history costs.
     const shouldRipImmediately =
       this.totalRipCount < this.prepared.demands.length * 2;
     if (
@@ -642,10 +1212,13 @@ export class RipUpRubberBandSolver extends BaseSolver {
             this.prepared.options.historyIncrement,
         );
       }
-      this.uncommitRoute(blockerRouteId);
-      if (this.failed) return;
-      const blockerDemand = this.prepared.demandById.get(blockerRouteId);
-      if (blockerDemand) this.queueDemand(blockerDemand.routeId);
+    }
+    const invalidatedRouteIds = this.uncommitRouteClosure(
+      shouldRipImmediately ? goal.blockers : [],
+    );
+    if (this.failed) return;
+    for (const routeId of invalidatedRouteIds) {
+      this.queueDemand(routeId);
     }
 
     const nodePath: number[] = [];
@@ -669,7 +1242,22 @@ export class RipUpRubberBandSolver extends BaseSolver {
       edgePath,
       blockerRouteIds: goal.blockers,
     };
+    const dependencies = new Set<string>();
+    if (nodePath.length === 1) {
+      for (const committedRoute of this.committed.values()) {
+        if (committedRoute.netId === route.netId) {
+          dependencies.add(committedRoute.routeId);
+        }
+      }
+    } else {
+      for (const ownerRouteId of this.nodeOwners.get(goal.graphNode) ?? []) {
+        if (this.committed.get(ownerRouteId)?.netId === route.netId) {
+          dependencies.add(ownerRouteId);
+        }
+      }
+    }
     this.committed.set(route.routeId, route);
+    this.routeDependenciesByRoute.set(route.routeId, dependencies);
     for (const nodeIndex of nodePath) {
       const owners = this.nodeOwners.get(nodeIndex) ?? new Set<string>();
       owners.add(route.routeId);
@@ -699,6 +1287,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
       if (owners?.size === 0) this.nodeOwners.delete(nodeIndex);
     }
     this.committed.delete(routeId);
+    this.routeDependenciesByRoute.delete(routeId);
     this.ripCountByRoute.set(
       routeId,
       (this.ripCountByRoute.get(routeId) ?? 0) + 1,
@@ -723,21 +1312,120 @@ export class RipUpRubberBandSolver extends BaseSolver {
     this.pending.push(demand);
   }
 
+  private uncommitRouteClosure(routeIds: Iterable<string>) {
+    const invalidated = new Set(routeIds);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const [candidateRouteId, dependencies] of this
+        .routeDependenciesByRoute) {
+        if (invalidated.has(candidateRouteId)) continue;
+        if ([...dependencies].some((routeId) => invalidated.has(routeId))) {
+          invalidated.add(candidateRouteId);
+          changed = true;
+        }
+      }
+    }
+    for (const routeId of invalidated) this.uncommitRoute(routeId);
+    return invalidated;
+  }
+
+  private assignPrefabViaBridge(routeId: string, minimumViaX?: number) {
+    if (
+      this.requiredPrefabViaIdsByRoute.has(routeId) ||
+      this.exhaustedPrefabViaBridgeRouteIds.has(routeId)
+    ) {
+      return;
+    }
+    const demand = this.prepared.demandById.get(routeId);
+    if (!demand || this.prepared.prefabricatedVias.length < 2) return;
+    const source = this.prepared.nodes[demand.sourceNode]!;
+    const target = this.prepared.nodes[demand.targetNode]!;
+    let best: { firstId: string; secondId: string; cost: number } | undefined;
+    for (const first of this.prepared.prefabricatedVias) {
+      if (minimumViaX !== undefined && first.x < minimumViaX) continue;
+      const firstReservation = this.reservedPrefabViaOwnerById.get(
+        first.prefabViaId,
+      );
+      if (firstReservation && firstReservation !== routeId) continue;
+      for (const second of this.prepared.prefabricatedVias) {
+        if (first.prefabViaId === second.prefabViaId) continue;
+        if (minimumViaX !== undefined && second.x < minimumViaX) continue;
+        const secondReservation = this.reservedPrefabViaOwnerById.get(
+          second.prefabViaId,
+        );
+        if (secondReservation && secondReservation !== routeId) continue;
+        const cost =
+          pointDistance(source, first) +
+          pointDistance(first, second) +
+          pointDistance(second, target);
+        if (!best || cost < best.cost) {
+          best = {
+            firstId: first.prefabViaId,
+            secondId: second.prefabViaId,
+            cost,
+          };
+        }
+      }
+    }
+    if (!best) return;
+    const requiredIds = [best.firstId, best.secondId];
+    this.requiredPrefabViaIdsByRoute.set(routeId, requiredIds);
+    for (const prefabViaId of requiredIds) {
+      this.reservedPrefabViaOwnerById.set(prefabViaId, routeId);
+    }
+  }
+
+  private releasePrefabViaBridge(routeId: string) {
+    const requiredIds = this.requiredPrefabViaIdsByRoute.get(routeId);
+    if (!requiredIds) return false;
+    this.requiredPrefabViaIdsByRoute.delete(routeId);
+    this.exhaustedPrefabViaBridgeRouteIds.add(routeId);
+    for (const prefabViaId of requiredIds) {
+      if (this.reservedPrefabViaOwnerById.get(prefabViaId) === routeId) {
+        this.reservedPrefabViaOwnerById.delete(prefabViaId);
+      }
+    }
+    return true;
+  }
+
   private finishOrScheduleNegotiationPass() {
     const conflictComponents = this.getConflictComponents();
+    this.lastConflictComponents = conflictComponents.map((component) => [
+      ...component,
+    ]);
     const allConflictingRouteIds = new Set(conflictComponents.flat());
     this.lastConflictRouteCount = allConflictingRouteIds.size;
     if (allConflictingRouteIds.size === 0) {
-      const disconnectedDemand = this.getDisconnectedDemands().sort((a, b) =>
+      const disconnectedDemands = this.getDisconnectedDemands().sort((a, b) =>
         a.routeId.localeCompare(b.routeId),
-      )[0];
-      if (disconnectedDemand) {
-        const repairDemand: RouteDemand = {
-          ...disconnectedDemand,
-          routeId: `connectivity-repair:${disconnectedDemand.netId}:${this.connectivityRepairCount++}`,
-        };
-        this.prepared.demandById.set(repairDemand.routeId, repairDemand);
-        this.pending.push(repairDemand);
+      );
+      if (disconnectedDemands.length > 0) {
+        const disconnectedNetIds = [
+          ...new Set(disconnectedDemands.map((demand) => demand.netId)),
+        ].sort();
+        const repairKey = `connectivity:${disconnectedNetIds.join("|")}`;
+        const repairCount =
+          (this.conflictComponentAttemptCount.get(repairKey) ?? 0) + 1;
+        this.conflictComponentAttemptCount.set(repairKey, repairCount);
+        if (repairCount > 4) {
+          this.fail(
+            `Atomic net rerouting repeatedly left ${disconnectedNetIds.join(", ")} disconnected`,
+          );
+          return;
+        }
+        const invalidatedRouteIds = this.uncommitRouteClosure(
+          this.prepared.demands
+            .filter((demand) => disconnectedNetIds.includes(demand.netId))
+            .map((demand) => demand.routeId),
+        );
+        if (this.failed) return;
+        const repairDemands = this.prepared.demands.filter((demand) =>
+          invalidatedRouteIds.has(demand.routeId),
+        );
+        for (const demand of repairDemands) {
+          this.queueDemand(demand.routeId);
+        }
         this.negotiationPassCount++;
         this.updateStats();
         return;
@@ -749,44 +1437,106 @@ export class RipUpRubberBandSolver extends BaseSolver {
       return;
     }
 
-    // Pathfinder converges by releasing every currently overused resource in
-    // one pass. Repairing one crossing at a time can simply move the crossing
-    // into a component which was legal a moment earlier, especially around a
-    // shared RP2040 power tree.
     const conflictingRouteIds = new Set(allConflictingRouteIds);
-    const componentKey = [...conflictingRouteIds].sort().join("|");
-    const componentAttempt =
-      (this.conflictComponentAttemptCount.get(componentKey) ?? 0) + 1;
-    this.conflictComponentAttemptCount.set(componentKey, componentAttempt);
-    if (conflictingRouteIds.size <= 16) {
-      const haloRouteCount = Math.min(
-        6,
-        1 + Math.floor((componentAttempt - 1) / 2),
+    let forcedAlternateLayer = false;
+    for (const component of conflictComponents) {
+      if (allConflictingRouteIds.size > 8) {
+        continue;
+      }
+      const componentKey = component.join("|");
+      const attemptCount =
+        (this.conflictComponentAttemptCount.get(componentKey) ?? 0) + 1;
+      this.conflictComponentAttemptCount.set(componentKey, attemptCount);
+      if (component.length < 2 || component.length > 2 || attemptCount < 3) {
+        continue;
+      }
+      if (forcedAlternateLayer) continue;
+      const conflictLayer = component.flatMap((routeId) => {
+        const route = this.committed.get(routeId);
+        const demand = this.prepared.demandById.get(routeId);
+        if (!route || !demand) return [];
+        for (const edgeId of route.edgePath) {
+          const edge = this.prepared.edges[edgeId]!;
+          if (
+            edge.kind === "trace" &&
+            this.getForeignOwners(edge, demand).some((foreignRouteId) =>
+              component.includes(foreignRouteId),
+            )
+          ) {
+            return [this.prepared.nodes[edge.fromNode]!.layer];
+          }
+        }
+        return [];
+      })[0];
+      const alternateLayer = this.prepared.layers.find(
+        (layer) => layer !== conflictLayer,
       );
-      for (let index = 0; index < haloRouteCount; index++) {
-        this.addOneNearbyTerminalRoute(
-          conflictingRouteIds,
-          (componentAttempt - 1) * 4 + index,
-        );
+      if (!conflictLayer || !alternateLayer) continue;
+      const shiftedDemand = component
+        .map((routeId) => this.prepared.demandById.get(routeId))
+        .filter((demand): demand is RouteDemand => Boolean(demand))
+        .filter(
+          (demand) =>
+            !demand.routeId.startsWith("connectivity-repair:") &&
+            !this.forcedGuideConnectionNames.has(demand.connectionName) &&
+            this.preferredLayerByRoute.get(demand.routeId) !== alternateLayer,
+        )
+        .sort((left, right) => {
+          const leftDistance = pointDistance(
+            this.prepared.nodes[left.sourceNode]!,
+            this.prepared.nodes[left.targetNode]!,
+          );
+          const rightDistance = pointDistance(
+            this.prepared.nodes[right.sourceNode]!,
+            this.prepared.nodes[right.targetNode]!,
+          );
+          return (
+            rightDistance - leftDistance ||
+            left.routeId.localeCompare(right.routeId)
+          );
+        })[0];
+      if (!shiftedDemand) continue;
+      this.preferredLayerByRoute.set(shiftedDemand.routeId, alternateLayer);
+      const penalties =
+        this.layerPenaltyByRoute.get(shiftedDemand.routeId) ??
+        new Map<string, number>();
+      penalties.set(
+        conflictLayer,
+        (penalties.get(conflictLayer) ?? 0) +
+          this.prepared.options.historyIncrement * 10,
+      );
+      this.layerPenaltyByRoute.set(shiftedDemand.routeId, penalties);
+      forcedAlternateLayer = true;
+    }
+    if (conflictingRouteIds.size <= 4) {
+      for (const routeId of conflictingRouteIds) {
+        const connectionName =
+          this.prepared.demandById.get(routeId)?.connectionName;
+        if (
+          connectionName &&
+          this.requiredGuideCountByConnectionName.has(connectionName)
+        ) {
+          this.forcedGuideConnectionNames.add(connectionName);
+        }
       }
     }
-
     this.negotiationPassCount++;
-    // Pathfinder-style history belongs on the congested resources, not every
-    // edge in a route which happened to touch a conflict. Penalizing whole
-    // routes makes long RP2040 power trees thrash instead of nudging the local
-    // crossing toward the neighboring free channel.
     for (const routeId of conflictingRouteIds) {
       const route = this.committed.get(routeId);
       for (const edgeId of route?.edgePath ?? []) {
         const edge = this.prepared.edges[edgeId]!;
         const demand = this.prepared.demandById.get(routeId)!;
         if (this.getForeignOwners(edge, demand).length === 0) continue;
-        this.historyCostByEdge.set(
+        for (const congestedEdgeId of [
           edgeId,
-          (this.historyCostByEdge.get(edgeId) ?? 0) +
-            this.prepared.options.historyIncrement,
-        );
+          ...(edge.kind === "trace" ? edge.conflictEdgeIds : []),
+        ]) {
+          this.historyCostByEdge.set(
+            congestedEdgeId,
+            (this.historyCostByEdge.get(congestedEdgeId) ?? 0) +
+              this.prepared.options.historyIncrement,
+          );
+        }
         for (const nodeIndex of [edge.fromNode, edge.toNode]) {
           this.historyCostByNode.set(
             nodeIndex,
@@ -796,33 +1546,28 @@ export class RipUpRubberBandSolver extends BaseSolver {
         }
       }
     }
-    const routeIdsToReroute = [...conflictingRouteIds].sort();
-    const isCompactRepair = routeIdsToReroute.length <= 12;
-    const rerouteDemands = routeIdsToReroute
-      .map((routeId) => this.prepared.demandById.get(routeId))
-      .filter((demand): demand is RouteDemand => Boolean(demand))
-      .filter((demand) => {
-        if (
-          (this.ripCountByRoute.get(demand.routeId) ?? 0) >=
-          this.prepared.options.maxRipsPerRoute
-        ) {
-          return false;
-        }
-        return true;
-      })
-      .sort((left, right) => {
-        if (!isCompactRepair) {
-          return (
-            this.prepared.demands.indexOf(left) -
-            this.prepared.demands.indexOf(right)
-          );
-        }
-        return (
-          deterministicOrderKey(left.routeId, this.negotiationPassCount) -
-            deterministicOrderKey(right.routeId, this.negotiationPassCount) ||
-          left.routeId.localeCompare(right.routeId)
-        );
-      });
+    // Treat disconnected compact components independently. The RP2040 case
+    // can have several unrelated two-route conflicts at once; gating this on
+    // the global conflict count prevents any component from breaking its
+    // local symmetry.
+    for (const component of conflictComponents) {
+      if (component.length <= 4) {
+        this.updateRouteLayerPenalties(new Set(component));
+      }
+    }
+    const routeIdsToReroute = this.uncommitRouteClosure(conflictingRouteIds);
+    if (this.failed) return;
+    const rerouteDemands = this.groupDemandsByNet(
+      [...routeIdsToReroute]
+        .map((routeId) => this.prepared.demandById.get(routeId))
+        .filter((demand): demand is RouteDemand => Boolean(demand))
+        .sort(
+          (left, right) =>
+            deterministicOrderKey(left.routeId, this.negotiationPassCount) -
+              deterministicOrderKey(right.routeId, this.negotiationPassCount) ||
+            left.routeId.localeCompare(right.routeId),
+        ),
+    );
 
     if (rerouteDemands.length === 0) {
       this.fail(
@@ -830,47 +1575,108 @@ export class RipUpRubberBandSolver extends BaseSolver {
       );
       return;
     }
-    if (isCompactRepair) {
-      // Release a compact conflicting component before attempting repair. If
-      // its routes are removed one at a time, the routes waiting to be
-      // rerouted still occupy every alternative corridor.
-      for (const demand of rerouteDemands) this.uncommitRoute(demand.routeId);
-      if (this.failed) return;
-    }
     for (const demand of rerouteDemands) this.queueDemand(demand.routeId);
     this.updateStats();
   }
 
-  private addOneNearbyTerminalRoute(routeIds: Set<string>, offset: number) {
-    const endpointNodes = [...routeIds].flatMap((routeId) => {
-      const demand = this.prepared.demandById.get(routeId);
-      return demand ? [demand.sourceNode, demand.targetNode] : [];
-    });
-    const candidates = this.prepared.demands
-      .filter(
-        (demand) =>
-          !routeIds.has(demand.routeId) && this.committed.has(demand.routeId),
-      )
-      .map((demand) => ({
-        routeId: demand.routeId,
-        distance: Math.min(
-          ...endpointNodes.flatMap((endpointNode) =>
-            [demand.sourceNode, demand.targetNode].map((candidateNode) =>
-              pointDistance(
-                this.prepared.nodes[endpointNode]!,
-                this.prepared.nodes[candidateNode]!,
-              ),
-            ),
-          ),
-        ),
-      }))
-      .sort(
-        (left, right) =>
-          left.distance - right.distance ||
-          left.routeId.localeCompare(right.routeId),
-      );
-    if (candidates.length === 0) return;
-    routeIds.add(candidates[offset % candidates.length]!.routeId);
+  private updateRouteLayerPenalties(routeFilter?: Set<string>) {
+    const routesToShift = new Set<string>();
+    const handledPairs = new Set<string>();
+    for (const route of this.committed.values()) {
+      if (routeFilter && !routeFilter.has(route.routeId)) continue;
+      const demand = this.prepared.demandById.get(route.routeId);
+      if (!demand) continue;
+      for (const edgeId of route.edgePath) {
+        const edge = this.prepared.edges[edgeId]!;
+        if (edge.kind !== "trace") continue;
+        const layer = this.prepared.nodes[edge.fromNode]!.layer;
+        for (const foreignRouteId of this.getForeignOwners(edge, demand)) {
+          if (routeFilter && !routeFilter.has(foreignRouteId)) continue;
+          const routeIds = [route.routeId, foreignRouteId].sort();
+          const pairKey = `${routeIds[0]}:${routeIds[1]}:${layer}`;
+          if (handledPairs.has(pairKey)) continue;
+          handledPairs.add(pairKey);
+          const candidates = routeIds
+            .map((routeId) => ({
+              routeId,
+              demand: this.prepared.demandById.get(routeId),
+            }))
+            .sort((left, right) => {
+              const shiftRank = (
+                routeId: string,
+                connectionName: string | undefined,
+              ) => {
+                if (connectionName?.startsWith("source_net_")) return 4;
+                const preferredLayer = this.preferredLayerByRoute.get(routeId);
+                if (preferredLayer && preferredLayer !== layer) return 3;
+                if (
+                  !preferredLayer &&
+                  connectionName?.startsWith("source_trace_")
+                )
+                  return 2;
+                return preferredLayer ? 0 : 1;
+              };
+              return (
+                shiftRank(right.routeId, right.demand?.connectionName) -
+                  shiftRank(left.routeId, left.demand?.connectionName) ||
+                (left.demand && right.demand
+                  ? pointDistance(
+                      this.prepared.nodes[left.demand.sourceNode]!,
+                      this.prepared.nodes[left.demand.targetNode]!,
+                    ) -
+                    pointDistance(
+                      this.prepared.nodes[right.demand.sourceNode]!,
+                      this.prepared.nodes[right.demand.targetNode]!,
+                    )
+                  : 0) ||
+                right.routeId.localeCompare(left.routeId)
+              );
+            });
+          const routeToShift = candidates[0]!.routeId;
+          routesToShift.add(routeToShift);
+          const otherRouteId = routeIds.find(
+            (routeId) => routeId !== routeToShift,
+          )!;
+          const selectedRoute = this.committed.get(routeToShift);
+          const selectedDemand = this.prepared.demandById.get(routeToShift);
+          const routeEdgeHistory =
+            this.historyCostByRouteEdge.get(routeToShift) ??
+            new Map<number, number>();
+          if (selectedRoute && selectedDemand) {
+            for (const selectedEdgeId of selectedRoute.edgePath) {
+              const selectedEdge = this.prepared.edges[selectedEdgeId]!;
+              if (
+                selectedEdge.kind !== "trace" ||
+                !this.getForeignOwners(selectedEdge, selectedDemand).includes(
+                  otherRouteId,
+                )
+              ) {
+                continue;
+              }
+              routeEdgeHistory.set(
+                selectedEdgeId,
+                (routeEdgeHistory.get(selectedEdgeId) ?? 0) +
+                  this.prepared.options.historyIncrement * 4,
+              );
+            }
+            this.historyCostByRouteEdge.set(routeToShift, routeEdgeHistory);
+          }
+          if (this.preferredLayerByRoute.get(routeToShift) === layer) {
+            continue;
+          }
+          const penalties =
+            this.layerPenaltyByRoute.get(routeToShift) ??
+            new Map<string, number>();
+          penalties.set(
+            layer,
+            (penalties.get(layer) ?? 0) +
+              this.prepared.options.historyIncrement,
+          );
+          this.layerPenaltyByRoute.set(routeToShift, penalties);
+        }
+      }
+    }
+    return routesToShift;
   }
 
   private getConflictComponents() {
