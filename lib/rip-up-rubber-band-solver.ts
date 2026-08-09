@@ -11,6 +11,7 @@ import { MinHeap } from "./min-heap";
 import type {
   BiscuitBoardRoutingSolution,
   BiscuitBoardRoutingStats,
+  Point,
   PreparedBiscuitRoutingProblem,
   RouteDemand,
   RoutedConnection,
@@ -37,8 +38,23 @@ interface ActiveSearch {
   targetTreesByLayer: Map<string, TargetKdNode | null>;
   nodes: SearchNode[];
   open: MinHeap<number>;
-  bestCostByState: Map<string, number>;
+  bestCostByState: Map<number, number>;
   expanded: number;
+  // Values that cannot change while this search is active, hoisted out of the
+  // per-edge inner loop.
+  requiredPrefabViaIds: string[];
+  requiredViaCount: number;
+  requiredGuideTarget: number;
+  escapeConstraints: TerminalEscapeConstraint[];
+  routeEdgeHistory: Map<number, number> | undefined;
+  layerPenalties: Map<string, number> | undefined;
+  preferredLayer: string | undefined;
+  congestionCost: number;
+  sourcePoint: Point;
+  targetPoint: Point;
+  isShortSignal: boolean;
+  isCorridorRoute: boolean;
+  net51Segment: [Point, Point] | null;
 }
 
 interface TargetKdNode {
@@ -131,8 +147,8 @@ export class RipUpRubberBandSolver extends BaseSolver {
   private readonly edgeOwners = new Map<number, Set<string>>();
   private readonly nodeOwners = new Map<number, Set<string>>();
   private readonly routeDependenciesByRoute = new Map<string, Set<string>>();
-  private readonly historyCostByEdge = new Map<number, number>();
-  private readonly historyCostByNode = new Map<number, number>();
+  private readonly historyCostByEdge: Float64Array;
+  private readonly historyCostByNode: Float64Array;
   private readonly historyCostByRouteEdge = new Map<
     string,
     Map<number, number>
@@ -150,10 +166,59 @@ export class RipUpRubberBandSolver extends BaseSolver {
   private readonly reservedGuideOwnerByEdgeId = new Map<number, string>();
   private readonly ripCountByRoute = new Map<string, number>();
   private readonly conflictComponentAttemptCount = new Map<string, number>();
-  private readonly terminalEscapeConstraintsByDemand = new Map<
-    string,
+  private readonly terminalEscapeConstraintsByDemand = new WeakMap<
+    RouteDemand,
     TerminalEscapeConstraint[]
   >();
+  // Static per-demand caches. Both lookups are pure functions of immutable
+  // topology and demand identity, so results never need invalidation.
+  private readonly edgeAllowanceByDemand = new WeakMap<
+    RouteDemand,
+    Uint8Array
+  >();
+  private readonly nodeAllowanceByDemand = new WeakMap<
+    RouteDemand,
+    Uint8Array
+  >();
+  private readonly foreignOwnersKeyByDemand = new WeakMap<
+    RouteDemand,
+    string
+  >();
+  // Directed-edge caches for penalty/constraint helpers whose results depend
+  // only on immutable topology and the demand: index = edgeId * 2 + direction.
+  private readonly escapeTraversalByDemand = new WeakMap<
+    RouteDemand,
+    Uint8Array
+  >();
+  private readonly fanoutPenaltyByDemand = new WeakMap<
+    RouteDemand,
+    Float64Array
+  >();
+  private readonly geometryPenaltyByDemand = new WeakMap<
+    RouteDemand,
+    Float64Array
+  >();
+  // The center-to-center distance between a trace edge and each entry in its
+  // conflictEdgeIds list is immutable topology; computing it once removes the
+  // dominant geometry cost from the A* inner loop.
+  private readonly conflictDistancesByEdge = new Map<number, Float64Array>();
+  // Foreign-owner lookups depend only on (edge, demand net, demand width) and
+  // the current route ownership; the version counter invalidates the cache
+  // whenever ownership mutates.
+  private ownershipVersion = 0;
+  private foreignOwnersCacheVersion = -1;
+  private readonly foreignOwnersCache = new Map<
+    number,
+    Map<string, string[]>
+  >();
+  // Incremental clearance occupancy: for each trace edge, which committed
+  // routes have copper within the generator's conflict radius, and at which
+  // center-to-center distances. Updated on commit/uncommit so the A* loop
+  // never rescans conflict lists.
+  private readonly occupancyByEdge = new Map<number, Map<string, number[]>>();
+  private readonly ownedNodeCountByNet = new Map<string, Map<number, number>>();
+  private readonly effectiveClearance: number;
+  private committedFixedViaTransitionCount = 0;
   private activeSearch: ActiveSearch | null = null;
   private connectivityRepairCount = 0;
   private totalRipCount = 0;
@@ -164,6 +229,12 @@ export class RipUpRubberBandSolver extends BaseSolver {
 
   constructor(public readonly prepared: PreparedBiscuitRoutingProblem) {
     super();
+    this.effectiveClearance = Math.max(
+      prepared.options.gridClearance,
+      prepared.input.minTraceToPadEdgeClearance ?? 0,
+    );
+    this.historyCostByEdge = new Float64Array(prepared.edges.length);
+    this.historyCostByNode = new Float64Array(prepared.nodes.length);
     const compareByDistance = (left: RouteDemand, right: RouteDemand) => {
       const leftDistance = pointDistance(
         prepared.nodes[left.sourceNode]!,
@@ -338,6 +409,11 @@ export class RipUpRubberBandSolver extends BaseSolver {
     const sourceVisitedPreferredLayer =
       preferredLayer === undefined ||
       this.prepared.nodes[sourceNode]!.layer === preferredLayer;
+    const requiredPrefabViaIds =
+      this.requiredPrefabViaIdsByRoute.get(demand.routeId) ?? [];
+    const sourcePoint = this.prepared.nodes[demand.sourceNode]!;
+    const targetPoint = this.prepared.nodes[demand.targetNode]!;
+    const trace93 = this.prepared.demandById.get("source_trace_93:0");
     return {
       demand,
       allowBlockers,
@@ -373,21 +449,43 @@ export class RipUpRubberBandSolver extends BaseSolver {
         ],
       ]),
       expanded: 0,
+      requiredPrefabViaIds,
+      requiredViaCount: requiredPrefabViaIds.length,
+      requiredGuideTarget: this.forcedGuideConnectionNames.has(
+        demand.connectionName,
+      )
+        ? (this.requiredGuideCountByConnectionName.get(demand.connectionName) ??
+          0)
+        : 0,
+      escapeConstraints: this.getTerminalEscapeConstraints(demand),
+      routeEdgeHistory: this.historyCostByRouteEdge.get(demand.routeId),
+      layerPenalties: this.layerPenaltyByRoute.get(demand.routeId),
+      preferredLayer,
+      congestionCost:
+        this.prepared.options.ripCost * (this.negotiationPassCount + 1) ** 2,
+      sourcePoint,
+      targetPoint,
+      isShortSignal:
+        demand.connectionName.startsWith("source_trace_") &&
+        pointDistance(sourcePoint, targetPoint) <= 10 &&
+        !this.requiredPrefabViaIdsByRoute.has(demand.routeId),
+      isCorridorRoute: [
+        "source_trace_30",
+        "source_trace_33",
+        "source_trace_34",
+      ].includes(demand.connectionName),
+      net51Segment:
+        demand.routeId === "source_net_5:1" && trace93
+          ? [
+              this.prepared.nodes[trace93.sourceNode]!,
+              this.prepared.nodes[trace93.targetNode]!,
+            ]
+          : null,
     };
   }
 
   private getOwnedNodesForNet(netId: string) {
-    const ownedNodes = new Set<number>();
-    for (const [nodeIndex, routeIds] of this.nodeOwners) {
-      if (
-        [...routeIds].some(
-          (routeId) => this.prepared.demandById.get(routeId)?.netId === netId,
-        )
-      ) {
-        ownedNodes.add(nodeIndex);
-      }
-    }
-    return ownedNodes;
+    return new Set(this.ownedNodeCountByNet.get(netId)?.keys() ?? []);
   }
 
   private getOwnedComponentsForNet(netId: string) {
@@ -430,23 +528,30 @@ export class RipUpRubberBandSolver extends BaseSolver {
     requiredViaIndex = 0,
     requiredGuideIndex = 0,
   ) {
+    // Packed numeric key: same state identity as the previous string key, but
+    // cheap enough to build in the A* inner loop.
     const node = this.prepared.nodes[graphNode]!;
     const arrivalKind =
       node.kind !== "fixed_via"
-        ? ""
-        : `:${
-            edgeFromParent === null
-              ? "start"
-              : this.prepared.edges[edgeFromParent]!.kind
-          }`;
+        ? 0
+        : edgeFromParent === null
+          ? 1
+          : this.prepared.edges[edgeFromParent]!.kind === "trace"
+            ? 2
+            : 3;
     const blockerState = collapseBlockerStates
-      ? "negotiated"
+      ? 3
       : blockers.length === 0
-        ? "clear"
-        : blockerSetHash(blockers);
-    return `${graphNode}${arrivalKind}:${blockerState}:${
-      visitedPreferredLayer ? "preferred" : "awaiting-preferred"
-    }:via-${requiredViaIndex}:guide-${requiredGuideIndex}`;
+        ? 0
+        : 1 + blockerSetHash(blockers);
+    return (
+      ((((graphNode * 4 + arrivalKind) * 4 + blockerState) * 2 +
+        (visitedPreferredLayer ? 1 : 0)) *
+        8 +
+        (requiredViaIndex + 2)) *
+        64 +
+      requiredGuideIndex
+    );
   }
 
   private heuristic(fromNode: number, toNode: number) {
@@ -525,15 +630,8 @@ export class RipUpRubberBandSolver extends BaseSolver {
     if (
       search.targetNodes.has(current.graphNode) &&
       current.visitedPreferredLayer &&
-      current.requiredViaIndex ===
-        (this.requiredPrefabViaIdsByRoute.get(search.demand.routeId)?.length ??
-          0) &&
-      current.requiredGuideIndex ===
-        (this.forcedGuideConnectionNames.has(search.demand.connectionName)
-          ? (this.requiredGuideCountByConnectionName.get(
-              search.demand.connectionName,
-            ) ?? 0)
-          : 0)
+      current.requiredViaIndex === search.requiredViaCount &&
+      current.requiredGuideIndex === search.requiredGuideTarget
     ) {
       this.commitGoal(search, searchNodeIndex);
       return;
@@ -578,8 +676,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
     ) {
       return;
     }
-    const requiredPrefabViaIds =
-      this.requiredPrefabViaIdsByRoute.get(search.demand.routeId) ?? [];
+    const requiredPrefabViaIds = search.requiredPrefabViaIds;
     let requiredViaIndex = parent.requiredViaIndex;
     let requiredGuideIndex = parent.requiredGuideIndex;
     if (
@@ -620,14 +717,26 @@ export class RipUpRubberBandSolver extends BaseSolver {
         if (requiredIndex === requiredViaIndex) requiredViaIndex++;
       }
     }
-    if (
-      !this.traversalFollowsTerminalEscapes(
-        parent.graphNode,
-        toNode,
-        search.demand,
-      )
-    ) {
-      return;
+    if (search.escapeConstraints.length > 0) {
+      // The escape verdict is symmetric in (from, to), so it caches per
+      // undirected edge.
+      let traversalCache = this.escapeTraversalByDemand.get(search.demand);
+      if (!traversalCache) {
+        traversalCache = new Uint8Array(this.prepared.edges.length);
+        this.escapeTraversalByDemand.set(search.demand, traversalCache);
+      }
+      let verdict = traversalCache[edgeId]!;
+      if (verdict === 0) {
+        verdict = this.traversalFollowsTerminalEscapes(
+          parent.graphNode,
+          toNode,
+          search.demand,
+        )
+          ? 1
+          : 2;
+        traversalCache[edgeId] = verdict;
+      }
+      if (verdict === 2) return;
     }
     if (!this.nodeAllowsDemand(toNode, search.demand)) return;
     if (!this.edgeAllowsDemand(edge, search.demand)) return;
@@ -650,42 +759,49 @@ export class RipUpRubberBandSolver extends BaseSolver {
     ) {
       return;
     }
-    const nextBlockers = insertSortedUnique(parent.blockers, foreignOwners);
+    const hasNewBlockers =
+      foreignOwners.length > 0 &&
+      foreignOwners.some((routeId) => !parent.blockers.includes(routeId));
+    const nextBlockers = hasNewBlockers
+      ? insertSortedUnique(parent.blockers, foreignOwners)
+      : parent.blockers;
     if (nextBlockers.length > this.prepared.options.maxBlockersPerSearch)
       return;
-    const presentCongestionCost =
-      this.prepared.options.ripCost * (this.negotiationPassCount + 1) ** 2;
     const newlyBlockedRouteCount = search.collapseBlockerStates
       ? foreignOwners.length
-      : foreignOwners.filter((routeId) => !parent.blockers.includes(routeId))
-          .length;
+      : hasNewBlockers
+        ? foreignOwners.filter((routeId) => !parent.blockers.includes(routeId))
+            .length
+        : 0;
     const nextG =
       parent.g +
       edge.cost +
       (edge.kind === "trace"
-        ? (this.layerPenaltyByRoute
-            .get(search.demand.routeId)
-            ?.get(currentNode.layer) ?? 0) * edge.cost
+        ? (search.layerPenalties?.get(currentNode.layer) ?? 0) * edge.cost
         : 0) +
-      (this.historyCostByEdge.get(edgeId) ?? 0) +
-      (this.historyCostByRouteEdge.get(search.demand.routeId)?.get(edgeId) ??
-        0) +
-      (this.historyCostByNode.get(toNode) ?? 0) +
-      this.getShortFanoutStraightRunPenalty(
+      this.historyCostByEdge[edgeId]! +
+      (search.routeEdgeHistory?.get(edgeId) ?? 0) +
+      this.historyCostByNode[toNode]! +
+      (search.escapeConstraints.length > 0
+        ? this.getShortFanoutStraightRunPenaltyCached(
+            search,
+            edgeId,
+            parent.graphNode,
+            toNode,
+          )
+        : 0) +
+      this.getRouteGeometryPenaltyCached(
+        search,
+        edgeId,
         parent.graphNode,
         toNode,
-        search.demand,
       ) +
-      this.getRouteGeometryPenalty(parent.graphNode, toNode, search.demand) +
-      newlyBlockedRouteCount * presentCongestionCost +
+      newlyBlockedRouteCount * search.congestionCost +
       foreignOwners.length * this.prepared.options.crossingCost;
-    const preferredLayer = this.preferredLayerByRoute.get(
-      search.demand.routeId,
-    );
     const visitedPreferredLayer =
       parent.visitedPreferredLayer ||
-      preferredLayer === undefined ||
-      this.prepared.nodes[toNode]!.layer === preferredLayer;
+      search.preferredLayer === undefined ||
+      this.prepared.nodes[toNode]!.layer === search.preferredLayer;
     const key = this.stateKey(
       toNode,
       edgeId,
@@ -719,8 +835,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
   }
 
   private getTerminalEscapeConstraints(demand: RouteDemand) {
-    const cacheKey = `${demand.connectionName}:${demand.sourceNode}:${demand.targetNode}`;
-    const cached = this.terminalEscapeConstraintsByDemand.get(cacheKey);
+    const cached = this.terminalEscapeConstraintsByDemand.get(demand);
     if (cached) return cached;
     if (demand.routeId === "source_net_1:4") {
       const constraints: TerminalEscapeConstraint[] = [
@@ -737,7 +852,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
           minimumRun: 0.75,
         },
       ];
-      this.terminalEscapeConstraintsByDemand.set(cacheKey, constraints);
+      this.terminalEscapeConstraintsByDemand.set(demand, constraints);
       return constraints;
     }
     const connection = this.prepared.input.connections.find(
@@ -747,7 +862,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
       !demand.connectionName.startsWith("source_trace_") ||
       connection?.pointsToConnect.length !== 2
     ) {
-      this.terminalEscapeConstraintsByDemand.set(cacheKey, []);
+      this.terminalEscapeConstraintsByDemand.set(demand, []);
       return [];
     }
 
@@ -788,7 +903,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
         minimumRun,
       });
     }
-    this.terminalEscapeConstraintsByDemand.set(cacheKey, constraints);
+    this.terminalEscapeConstraintsByDemand.set(demand, constraints);
     return constraints;
   }
 
@@ -1005,22 +1120,79 @@ export class RipUpRubberBandSolver extends BaseSolver {
     return 0;
   }
 
-  private getRouteGeometryPenalty(
+  private getShortFanoutStraightRunPenaltyCached(
+    search: ActiveSearch,
+    edgeId: number,
     fromNodeIndex: number,
     toNodeIndex: number,
-    demand: RouteDemand,
   ) {
+    // Both penalty helpers are pure functions of the demand and the edge's
+    // endpoints, and symmetric in (from, to), so they cache per edge.
+    let cache = this.fanoutPenaltyByDemand.get(search.demand);
+    if (!cache) {
+      cache = new Float64Array(this.prepared.edges.length).fill(Number.NaN);
+      this.fanoutPenaltyByDemand.set(search.demand, cache);
+    }
+    let penalty = cache[edgeId]!;
+    if (Number.isNaN(penalty)) {
+      penalty = this.getShortFanoutStraightRunPenalty(
+        fromNodeIndex,
+        toNodeIndex,
+        search.demand,
+      );
+      cache[edgeId] = penalty;
+    }
+    return penalty;
+  }
+
+  private getRouteGeometryPenaltyCached(
+    search: ActiveSearch,
+    edgeId: number,
+    fromNodeIndex: number,
+    toNodeIndex: number,
+  ) {
+    if (
+      !search.isShortSignal &&
+      !search.isCorridorRoute &&
+      search.net51Segment === null
+    ) {
+      return 0;
+    }
+    let cache = this.geometryPenaltyByDemand.get(search.demand);
+    if (!cache) {
+      cache = new Float64Array(this.prepared.edges.length).fill(Number.NaN);
+      this.geometryPenaltyByDemand.set(search.demand, cache);
+    }
+    let penalty = cache[edgeId]!;
+    if (Number.isNaN(penalty)) {
+      penalty = this.getRouteGeometryPenalty(
+        search,
+        fromNodeIndex,
+        toNodeIndex,
+      );
+      cache[edgeId] = penalty;
+    }
+    return penalty;
+  }
+
+  private getRouteGeometryPenalty(
+    search: ActiveSearch,
+    fromNodeIndex: number,
+    toNodeIndex: number,
+  ) {
+    if (
+      !search.isShortSignal &&
+      !search.isCorridorRoute &&
+      search.net51Segment === null
+    ) {
+      return 0;
+    }
     const from = this.prepared.nodes[fromNodeIndex]!;
     const to = this.prepared.nodes[toNodeIndex]!;
     let shortSignalCorridorPenalty = 0;
-    const source = this.prepared.nodes[demand.sourceNode]!;
-    const target = this.prepared.nodes[demand.targetNode]!;
-    if (
-      demand.connectionName.startsWith("source_trace_") &&
-      pointDistance(source, target) <= 10 &&
-      !this.requiredPrefabViaIdsByRoute.has(demand.routeId) &&
-      from.layer === to.layer
-    ) {
+    const source = search.sourcePoint;
+    const target = search.targetPoint;
+    if (search.isShortSignal && from.layer === to.layer) {
       const midpoint = { x: (from.x + to.x) / 2, y: (from.y + to.y) / 2 };
       shortSignalCorridorPenalty =
         segmentDistance(midpoint, midpoint, source, target) *
@@ -1031,11 +1203,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
     if (from.layer !== "top" || to.layer !== "top") {
       return shortSignalCorridorPenalty;
     }
-    if (
-      ["source_trace_30", "source_trace_33", "source_trace_34"].includes(
-        demand.connectionName,
-      )
-    ) {
+    if (search.isCorridorRoute) {
       const midpoint = { x: (from.x + to.x) / 2, y: (from.y + to.y) / 2 };
       const corridorDeviation = segmentDistance(
         midpoint,
@@ -1050,12 +1218,13 @@ export class RipUpRubberBandSolver extends BaseSolver {
         8
       );
     }
-    if (demand.routeId === "source_net_5:1") {
-      const trace93 = this.prepared.demandById.get("source_trace_93:0");
-      if (!trace93) return 0;
-      const trace93Source = this.prepared.nodes[trace93.sourceNode]!;
-      const trace93Target = this.prepared.nodes[trace93.targetNode]!;
-      const distance = segmentDistance(from, to, trace93Source, trace93Target);
+    if (search.net51Segment !== null) {
+      const distance = segmentDistance(
+        from,
+        to,
+        search.net51Segment[0],
+        search.net51Segment[1],
+      );
       return (
         Math.max(0, 0.7 - distance) *
         pointDistance(from, to) *
@@ -1067,8 +1236,15 @@ export class RipUpRubberBandSolver extends BaseSolver {
   }
 
   private nodeAllowsDemand(nodeIndex: number, demand: RouteDemand) {
+    let cache = this.nodeAllowanceByDemand.get(demand);
+    if (!cache) {
+      cache = new Uint8Array(this.prepared.nodes.length);
+      this.nodeAllowanceByDemand.set(demand, cache);
+    }
+    const cached = cache[nodeIndex]!;
+    if (cached !== 0) return cached === 1;
     const node = this.prepared.nodes[nodeIndex]!;
-    return (
+    const allowed =
       node.kind !== "terminal" ||
       node.terminalConnectionNames.some((connectionName) =>
         [
@@ -1076,11 +1252,25 @@ export class RipUpRubberBandSolver extends BaseSolver {
           demand.netId,
           ...(demand.allowedConnectionNames ?? []),
         ].includes(connectionName),
-      )
-    );
+      );
+    cache[nodeIndex] = allowed ? 1 : 2;
+    return allowed;
   }
 
   private edgeAllowsDemand(edge: RoutingEdge, demand: RouteDemand) {
+    let cache = this.edgeAllowanceByDemand.get(demand);
+    if (!cache) {
+      cache = new Uint8Array(this.prepared.edges.length);
+      this.edgeAllowanceByDemand.set(demand, cache);
+    }
+    const cached = cache[edge.edgeId]!;
+    if (cached !== 0) return cached === 1;
+    const allowed = this.computeEdgeAllowsDemand(edge, demand);
+    cache[edge.edgeId] = allowed ? 1 : 2;
+    return allowed;
+  }
+
+  private computeEdgeAllowsDemand(edge: RoutingEdge, demand: RouteDemand) {
     if (edge.kind === "fixed_via_transition") return true;
     if (
       edge.restrictedToConnectionName !== undefined &&
@@ -1134,37 +1324,43 @@ export class RipUpRubberBandSolver extends BaseSolver {
     return true;
   }
 
+  private getConflictDistances(edge: Extract<RoutingEdge, { kind: "trace" }>) {
+    let distances = this.conflictDistancesByEdge.get(edge.edgeId);
+    if (distances) return distances;
+    const from = this.prepared.nodes[edge.fromNode]!;
+    const to = this.prepared.nodes[edge.toNode]!;
+    distances = new Float64Array(edge.conflictEdgeIds.length);
+    for (let index = 0; index < edge.conflictEdgeIds.length; index++) {
+      const candidateEdge = this.prepared.edges[edge.conflictEdgeIds[index]!]!;
+      distances[index] = segmentDistance(
+        from,
+        to,
+        this.prepared.nodes[candidateEdge.fromNode]!,
+        this.prepared.nodes[candidateEdge.toNode]!,
+      );
+    }
+    this.conflictDistancesByEdge.set(edge.edgeId, distances);
+    return distances;
+  }
+
   private getForeignOwners(edge: RoutingEdge, demand: RouteDemand) {
+    if (this.foreignOwnersCacheVersion !== this.ownershipVersion) {
+      this.foreignOwnersCache.clear();
+      this.foreignOwnersCacheVersion = this.ownershipVersion;
+    }
+    let demandKey = this.foreignOwnersKeyByDemand.get(demand);
+    if (demandKey === undefined) {
+      demandKey = `${demand.netId} ${demand.width}`;
+      this.foreignOwnersKeyByDemand.set(demand, demandKey);
+    }
+    let byDemandKey = this.foreignOwnersCache.get(edge.edgeId);
+    const cached = byDemandKey?.get(demandKey);
+    if (cached) return cached;
     const ownerRouteIds = new Set<string>();
-    const addForeign = (
-      routeIds: Iterable<string> | undefined,
-      candidateEdge?: RoutingEdge,
-    ) => {
+    const addForeign = (routeIds: Iterable<string> | undefined) => {
       for (const routeId of routeIds ?? []) {
         const ownerDemand = this.prepared.demandById.get(routeId);
         if (!ownerDemand || ownerDemand.netId === demand.netId) continue;
-        if (
-          edge.kind === "trace" &&
-          candidateEdge?.kind === "trace" &&
-          edge.edgeId !== candidateEdge.edgeId
-        ) {
-          const from = this.prepared.nodes[edge.fromNode]!;
-          const to = this.prepared.nodes[edge.toNode]!;
-          const candidateFrom = this.prepared.nodes[candidateEdge.fromNode]!;
-          const candidateTo = this.prepared.nodes[candidateEdge.toNode]!;
-          const clearance = Math.max(
-            this.prepared.options.gridClearance,
-            this.prepared.input.minTraceToPadEdgeClearance ?? 0,
-          );
-          const minimumCenterDistance =
-            demand.width / 2 + ownerDemand.width / 2 + clearance;
-          if (
-            segmentDistance(from, to, candidateFrom, candidateTo) >=
-            minimumCenterDistance - 1e-7
-          ) {
-            continue;
-          }
-        }
         ownerRouteIds.add(routeId);
       }
     };
@@ -1172,14 +1368,30 @@ export class RipUpRubberBandSolver extends BaseSolver {
     addForeign(this.nodeOwners.get(edge.toNode));
     if (edge.kind === "trace") {
       addForeign(this.edgeOwners.get(edge.edgeId));
-      for (const conflictEdgeId of edge.conflictEdgeIds) {
-        addForeign(
-          this.edgeOwners.get(conflictEdgeId),
-          this.prepared.edges[conflictEdgeId],
-        );
+      const occupancy = this.occupancyByEdge.get(edge.edgeId);
+      if (occupancy) {
+        for (const [routeId, distances] of occupancy) {
+          if (ownerRouteIds.has(routeId)) continue;
+          const ownerDemand = this.prepared.demandById.get(routeId);
+          if (!ownerDemand || ownerDemand.netId === demand.netId) continue;
+          const minimumCenterDistance =
+            demand.width / 2 + ownerDemand.width / 2 + this.effectiveClearance;
+          for (const distance of distances) {
+            if (distance < minimumCenterDistance - 1e-7) {
+              ownerRouteIds.add(routeId);
+              break;
+            }
+          }
+        }
       }
     }
-    return [...ownerRouteIds].sort();
+    const result = [...ownerRouteIds].sort();
+    if (!byDemandKey) {
+      byDemandKey = new Map();
+      this.foreignOwnersCache.set(edge.edgeId, byDemandKey);
+    }
+    byDemandKey.set(demandKey, result);
+    return result;
   }
 
   private commitGoal(search: ActiveSearch, goalIndex: number) {
@@ -1199,18 +1411,12 @@ export class RipUpRubberBandSolver extends BaseSolver {
     for (const blockerRouteId of shouldRipImmediately ? goal.blockers : []) {
       const blockerRoute = this.committed.get(blockerRouteId);
       for (const edgeId of blockerRoute?.edgePath ?? []) {
-        this.historyCostByEdge.set(
-          edgeId,
-          (this.historyCostByEdge.get(edgeId) ?? 0) +
-            this.prepared.options.historyIncrement,
-        );
+        this.historyCostByEdge[edgeId]! +=
+          this.prepared.options.historyIncrement;
       }
       for (const nodeIndex of blockerRoute?.nodePath ?? []) {
-        this.historyCostByNode.set(
-          nodeIndex,
-          (this.historyCostByNode.get(nodeIndex) ?? 0) +
-            this.prepared.options.historyIncrement,
-        );
+        this.historyCostByNode[nodeIndex]! +=
+          this.prepared.options.historyIncrement;
       }
     }
     const invalidatedRouteIds = this.uncommitRouteClosure(
@@ -1258,18 +1464,41 @@ export class RipUpRubberBandSolver extends BaseSolver {
     }
     this.committed.set(route.routeId, route);
     this.routeDependenciesByRoute.set(route.routeId, dependencies);
+    const ownedNodeCounts =
+      this.ownedNodeCountByNet.get(route.netId) ?? new Map<number, number>();
+    this.ownedNodeCountByNet.set(route.netId, ownedNodeCounts);
     for (const nodeIndex of nodePath) {
       const owners = this.nodeOwners.get(nodeIndex) ?? new Set<string>();
       owners.add(route.routeId);
       this.nodeOwners.set(nodeIndex, owners);
+      ownedNodeCounts.set(nodeIndex, (ownedNodeCounts.get(nodeIndex) ?? 0) + 1);
     }
     for (const edgeId of edgePath) {
       const edge = this.prepared.edges[edgeId]!;
-      if (edge.kind !== "trace") continue;
+      if (edge.kind !== "trace") {
+        this.committedFixedViaTransitionCount++;
+        continue;
+      }
       const owners = this.edgeOwners.get(edgeId) ?? new Set<string>();
       owners.add(route.routeId);
       this.edgeOwners.set(edgeId, owners);
+      const conflictDistances = this.getConflictDistances(edge);
+      for (let index = 0; index < edge.conflictEdgeIds.length; index++) {
+        const conflictEdgeId = edge.conflictEdgeIds[index]!;
+        let occupancy = this.occupancyByEdge.get(conflictEdgeId);
+        if (!occupancy) {
+          occupancy = new Map();
+          this.occupancyByEdge.set(conflictEdgeId, occupancy);
+        }
+        let distances = occupancy.get(route.routeId);
+        if (!distances) {
+          distances = [];
+          occupancy.set(route.routeId, distances);
+        }
+        distances.push(conflictDistances[index]!);
+      }
     }
+    this.ownershipVersion++;
     this.activeSearch = null;
   }
 
@@ -1277,15 +1506,39 @@ export class RipUpRubberBandSolver extends BaseSolver {
     const route = this.committed.get(routeId);
     if (!route) return;
     for (const edgeId of route.edgePath) {
+      const edge = this.prepared.edges[edgeId]!;
+      if (edge.kind !== "trace") {
+        this.committedFixedViaTransitionCount--;
+        continue;
+      }
       const owners = this.edgeOwners.get(edgeId);
       owners?.delete(routeId);
       if (owners?.size === 0) this.edgeOwners.delete(edgeId);
+      for (const conflictEdgeId of edge.conflictEdgeIds) {
+        const occupancy = this.occupancyByEdge.get(conflictEdgeId);
+        const distances = occupancy?.get(routeId);
+        if (!distances) continue;
+        if (distances.length <= 1) {
+          occupancy!.delete(routeId);
+          if (occupancy!.size === 0)
+            this.occupancyByEdge.delete(conflictEdgeId);
+        } else {
+          distances.pop();
+        }
+      }
     }
+    const ownedNodeCounts = this.ownedNodeCountByNet.get(route.netId);
     for (const nodeIndex of route.nodePath) {
       const owners = this.nodeOwners.get(nodeIndex);
       owners?.delete(routeId);
       if (owners?.size === 0) this.nodeOwners.delete(nodeIndex);
+      const count = ownedNodeCounts?.get(nodeIndex);
+      if (count !== undefined) {
+        if (count <= 1) ownedNodeCounts!.delete(nodeIndex);
+        else ownedNodeCounts!.set(nodeIndex, count - 1);
+      }
     }
+    this.ownershipVersion++;
     this.committed.delete(routeId);
     this.routeDependenciesByRoute.delete(routeId);
     this.ripCountByRoute.set(
@@ -1531,18 +1784,12 @@ export class RipUpRubberBandSolver extends BaseSolver {
           edgeId,
           ...(edge.kind === "trace" ? edge.conflictEdgeIds : []),
         ]) {
-          this.historyCostByEdge.set(
-            congestedEdgeId,
-            (this.historyCostByEdge.get(congestedEdgeId) ?? 0) +
-              this.prepared.options.historyIncrement,
-          );
+          this.historyCostByEdge[congestedEdgeId]! +=
+            this.prepared.options.historyIncrement;
         }
         for (const nodeIndex of [edge.fromNode, edge.toNode]) {
-          this.historyCostByNode.set(
-            nodeIndex,
-            (this.historyCostByNode.get(nodeIndex) ?? 0) +
-              this.prepared.options.historyIncrement,
-          );
+          this.historyCostByNode[nodeIndex]! +=
+            this.prepared.options.historyIncrement;
         }
       }
     }
@@ -1891,13 +2138,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
   }
 
   private getStats(): BiscuitBoardRoutingStats {
-    let fixedViaTransitionCount = 0;
-    for (const route of this.committed.values()) {
-      fixedViaTransitionCount += route.edgePath.filter(
-        (edgeId) =>
-          this.prepared.edges[edgeId]!.kind === "fixed_via_transition",
-      ).length;
-    }
+    const fixedViaTransitionCount = this.committedFixedViaTransitionCount;
     return {
       routeCount: this.prepared.demandById.size,
       routedCount: this.committed.size,
