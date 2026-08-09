@@ -100,8 +100,29 @@ const nearestTargetDistanceSquared = (
   return best;
 };
 
-const insertSortedUnique = (values: readonly string[], additions: string[]) =>
-  [...new Set([...values, ...additions])].sort();
+const insertSortedUnique = (values: string[], additions: string[]) => {
+  if (additions.length === 0) return values;
+  if (values.length === 0) return additions;
+  const merged: string[] = [];
+  let valueIndex = 0;
+  let additionIndex = 0;
+  while (valueIndex < values.length || additionIndex < additions.length) {
+    const value = values[valueIndex];
+    const addition = additions[additionIndex];
+    let next: string;
+    if (addition === undefined || (value !== undefined && value < addition)) {
+      next = values[valueIndex++]!;
+    } else if (value === undefined || addition < value) {
+      next = additions[additionIndex++]!;
+    } else {
+      next = value;
+      valueIndex++;
+      additionIndex++;
+    }
+    if (merged.at(-1) !== next) merged.push(next);
+  }
+  return merged;
+};
 
 const blockerSetHash = (blockers: readonly string[]) => {
   let hash = 2166136261;
@@ -129,6 +150,10 @@ export class RipUpRubberBandSolver extends BaseSolver {
   private readonly committed = new Map<string, RoutedConnection>();
   private readonly pending: RouteDemand[];
   private readonly edgeOwners = new Map<number, Set<string>>();
+  private readonly conflictOwnersByEdge = new Map<
+    number,
+    Map<string, Set<number>>
+  >();
   private readonly nodeOwners = new Map<number, Set<string>>();
   private readonly routeDependenciesByRoute = new Map<string, Set<string>>();
   private readonly historyCostByEdge = new Map<number, number>();
@@ -1172,11 +1197,13 @@ export class RipUpRubberBandSolver extends BaseSolver {
     addForeign(this.nodeOwners.get(edge.toNode));
     if (edge.kind === "trace") {
       addForeign(this.edgeOwners.get(edge.edgeId));
-      for (const conflictEdgeId of edge.conflictEdgeIds) {
-        addForeign(
-          this.edgeOwners.get(conflictEdgeId),
-          this.prepared.edges[conflictEdgeId],
-        );
+      for (const [routeId, candidateEdgeIds] of this.conflictOwnersByEdge.get(
+        edge.edgeId,
+      ) ?? []) {
+        for (const candidateEdgeId of candidateEdgeIds) {
+          addForeign([routeId], this.prepared.edges[candidateEdgeId]);
+          if (ownerRouteIds.has(routeId)) break;
+        }
       }
     }
     return [...ownerRouteIds].sort();
@@ -1269,6 +1296,15 @@ export class RipUpRubberBandSolver extends BaseSolver {
       const owners = this.edgeOwners.get(edgeId) ?? new Set<string>();
       owners.add(route.routeId);
       this.edgeOwners.set(edgeId, owners);
+      for (const conflictEdgeId of edge.conflictEdgeIds) {
+        const conflictOwners =
+          this.conflictOwnersByEdge.get(conflictEdgeId) ??
+          new Map<string, Set<number>>();
+        const ownedEdgeIds = conflictOwners.get(route.routeId) ?? new Set();
+        ownedEdgeIds.add(edgeId);
+        conflictOwners.set(route.routeId, ownedEdgeIds);
+        this.conflictOwnersByEdge.set(conflictEdgeId, conflictOwners);
+      }
     }
     this.activeSearch = null;
   }
@@ -1277,9 +1313,20 @@ export class RipUpRubberBandSolver extends BaseSolver {
     const route = this.committed.get(routeId);
     if (!route) return;
     for (const edgeId of route.edgePath) {
+      const edge = this.prepared.edges[edgeId]!;
       const owners = this.edgeOwners.get(edgeId);
       owners?.delete(routeId);
       if (owners?.size === 0) this.edgeOwners.delete(edgeId);
+      if (edge.kind !== "trace") continue;
+      for (const conflictEdgeId of edge.conflictEdgeIds) {
+        const conflictOwners = this.conflictOwnersByEdge.get(conflictEdgeId);
+        const ownedEdgeIds = conflictOwners?.get(routeId);
+        ownedEdgeIds?.delete(edgeId);
+        if (ownedEdgeIds?.size === 0) conflictOwners?.delete(routeId);
+        if (conflictOwners?.size === 0) {
+          this.conflictOwnersByEdge.delete(conflictEdgeId);
+        }
+      }
     }
     for (const nodeIndex of route.nodePath) {
       const owners = this.nodeOwners.get(nodeIndex);
