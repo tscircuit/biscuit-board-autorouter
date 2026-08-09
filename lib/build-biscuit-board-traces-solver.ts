@@ -13,6 +13,7 @@ const sanitizeId = (value: string) => value.replace(/[^a-zA-Z0-9_-]+/g, "_");
 const collapseCollinearNodes = (
   prepared: PreparedBiscuitRoutingProblem,
   nodePath: number[],
+  protectedNodeIndexes: ReadonlySet<number>,
 ) => {
   if (nodePath.length <= 2) return [...nodePath];
   const result = [nodePath[0]!];
@@ -24,6 +25,7 @@ const collapseCollinearNodes = (
       (current.x - previous.x) * (next.y - current.y) -
       (current.y - previous.y) * (next.x - current.x);
     if (
+      !protectedNodeIndexes.has(nodePath[index]!) &&
       previous.layer === current.layer &&
       current.layer === next.layer &&
       Math.abs(cross) <= 1e-8
@@ -39,6 +41,7 @@ const collapseCollinearNodes = (
 const routeToTrace = (
   prepared: PreparedBiscuitRoutingProblem,
   route: RoutedConnection,
+  protectedNodeIndexes: ReadonlySet<number>,
 ): SimplifiedPcbTrace => {
   const demand = prepared.demandById.get(route.routeId)!;
   const usedPrefabViaIds = [
@@ -51,7 +54,11 @@ const routeToTrace = (
       return prefabViaId ? [prefabViaId] : [];
     }),
   ];
-  const nodePath = collapseCollinearNodes(prepared, route.nodePath);
+  const nodePath = collapseCollinearNodes(
+    prepared,
+    route.nodePath,
+    protectedNodeIndexes,
+  );
   const outputRoute: SimplifiedPcbTrace["route"] = [];
 
   for (let index = 0; index < nodePath.length; index++) {
@@ -153,8 +160,21 @@ export class BuildBiscuitBoardTracesSolver extends BaseSolver {
   }
 
   override _step() {
+    const protectedNodeIndexes = new Set<number>();
+    for (const route of this.routed.routes) {
+      const demand = this.prepared.demandById.get(route.routeId)!;
+      for (const endpointNode of [route.nodePath[0], route.nodePath.at(-1)]) {
+        if (
+          endpointNode !== undefined &&
+          endpointNode !== demand.sourceNode &&
+          endpointNode !== demand.targetNode
+        ) {
+          protectedNodeIndexes.add(endpointNode);
+        }
+      }
+    }
     const traces = this.routed.routes.map((route) =>
-      routeToTrace(this.prepared, route),
+      routeToTrace(this.prepared, route, protectedNodeIndexes),
     );
     assertOnlyPrefabricatedVias(this.prepared, traces);
     this.output = { ...this.routed, traces };

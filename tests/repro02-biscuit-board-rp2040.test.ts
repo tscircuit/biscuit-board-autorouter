@@ -16,6 +16,42 @@ import solvedFixture from "../repros/fixtures/repro02-biscuit-board-rp2040.solve
 const input = capturedInput as SimpleRouteJson;
 const built = builtFixture as BiscuitBoardRoutingSolution;
 const solved = solvedFixture as BiscuitBoardRoutingSolution;
+const pointIsOnTrace = (
+  point: { x: number; y: number; layer: string },
+  trace: BiscuitBoardRoutingSolution["traces"][number],
+) => {
+  if (
+    trace.route.some(
+      (routePoint) =>
+        routePoint.route_type === "wire" &&
+        routePoint.layer === point.layer &&
+        Math.abs(routePoint.x - point.x) <= 1e-6 &&
+        Math.abs(routePoint.y - point.y) <= 1e-6,
+    )
+  ) {
+    return true;
+  }
+  for (let index = 1; index < trace.route.length; index++) {
+    const start = trace.route[index - 1]!;
+    const end = trace.route[index]!;
+    if (
+      start.route_type !== "wire" ||
+      end.route_type !== "wire" ||
+      start.layer !== point.layer ||
+      end.layer !== point.layer
+    ) {
+      continue;
+    }
+    const cross =
+      (point.x - start.x) * (end.y - start.y) -
+      (point.y - start.y) * (end.x - start.x);
+    const dot =
+      (point.x - start.x) * (point.x - end.x) +
+      (point.y - start.y) * (point.y - end.y);
+    if (Math.abs(cross) <= 1e-6 && dot <= 1e-6) return true;
+  }
+  return false;
+};
 let prepared: PreparedBiscuitRoutingProblem | undefined;
 const getPrepared = () =>
   (prepared ??= generateBiscuitBoardHypergraph(input, {
@@ -64,6 +100,33 @@ test("matches the solved BiscuitBoard RP2040 repro02 SVG", async () => {
     ),
   ).toEqual([]);
   expect(getTraceClearanceViolations(problem, output!)).toEqual([]);
+  const protectedTreeJunctions = output!.routes.flatMap((route, traceIndex) => {
+    const demand = problem.demandById.get(route.routeId)!;
+    return [route.nodePath[0], route.nodePath.at(-1)].flatMap((endpointNode) =>
+      endpointNode !== undefined &&
+      endpointNode !== demand.sourceNode &&
+      endpointNode !== demand.targetNode
+        ? [
+            {
+              traceIndex,
+              netId: route.netId,
+              node: problem.nodes[endpointNode]!,
+            },
+          ]
+        : [],
+    );
+  });
+  expect(protectedTreeJunctions.length).toBeGreaterThan(0);
+  expect(
+    protectedTreeJunctions.every(({ traceIndex, netId, node }) =>
+      output!.traces.some(
+        (trace, otherTraceIndex) =>
+          otherTraceIndex !== traceIndex &&
+          output!.routes[otherTraceIndex]!.netId === netId &&
+          pointIsOnTrace(node, trace),
+      ),
+    ),
+  ).toBe(true);
 
   const svg = getSvgFromGraphicsObject(solver.visualize(), {
     backgroundColor: "white",
