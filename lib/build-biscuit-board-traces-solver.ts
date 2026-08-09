@@ -10,6 +10,71 @@ import type {
 
 const sanitizeId = (value: string) => value.replace(/[^a-zA-Z0-9_-]+/g, "_");
 
+const expandSharedNetRoute = (
+  prepared: PreparedBiscuitRoutingProblem,
+  routes: RoutedConnection[],
+  route: RoutedConnection,
+): RoutedConnection => {
+  const demand = prepared.demandById.get(route.routeId)!;
+  if (route.nodePath.length !== 1 || demand.sourceNode === demand.targetNode) {
+    return route;
+  }
+
+  const adjacency = new Map<
+    number,
+    Array<{ nodeIndex: number; edgeId: number }>
+  >();
+  const addEdge = (from: number, to: number, edgeId: number) => {
+    const neighbors = adjacency.get(from) ?? [];
+    neighbors.push({ nodeIndex: to, edgeId });
+    adjacency.set(from, neighbors);
+  };
+  for (const candidate of routes) {
+    if (
+      candidate.netId !== route.netId ||
+      candidate.routeId === route.routeId
+    ) {
+      continue;
+    }
+    for (let index = 1; index < candidate.nodePath.length; index++) {
+      const from = candidate.nodePath[index - 1]!;
+      const to = candidate.nodePath[index]!;
+      const edgeId = candidate.edgePath[index - 1]!;
+      addEdge(from, to, edgeId);
+      addEdge(to, from, edgeId);
+    }
+  }
+
+  const previous = new Map<number, { nodeIndex: number; edgeId: number }>();
+  const queue = [demand.sourceNode];
+  previous.set(demand.sourceNode, {
+    nodeIndex: demand.sourceNode,
+    edgeId: -1,
+  });
+  for (let queueIndex = 0; queueIndex < queue.length; queueIndex++) {
+    const current = queue[queueIndex]!;
+    if (current === demand.targetNode) break;
+    for (const neighbor of adjacency.get(current) ?? []) {
+      if (previous.has(neighbor.nodeIndex)) continue;
+      previous.set(neighbor.nodeIndex, {
+        nodeIndex: current,
+        edgeId: neighbor.edgeId,
+      });
+      queue.push(neighbor.nodeIndex);
+    }
+  }
+  if (!previous.has(demand.targetNode)) return route;
+
+  const nodePath = [demand.targetNode];
+  const edgePath: number[] = [];
+  while (nodePath[0] !== demand.sourceNode) {
+    const entry = previous.get(nodePath[0]!)!;
+    nodePath.unshift(entry.nodeIndex);
+    edgePath.unshift(entry.edgeId);
+  }
+  return { ...route, nodePath, edgePath };
+};
+
 const collapseCollinearNodes = (
   prepared: PreparedBiscuitRoutingProblem,
   nodePath: number[],
@@ -174,7 +239,11 @@ export class BuildBiscuitBoardTracesSolver extends BaseSolver {
       }
     }
     const traces = this.routed.routes.map((route) =>
-      routeToTrace(this.prepared, route, protectedNodeIndexes),
+      routeToTrace(
+        this.prepared,
+        expandSharedNetRoute(this.prepared, this.routed.routes, route),
+        protectedNodeIndexes,
+      ),
     );
     assertOnlyPrefabricatedVias(this.prepared, traces);
     this.output = { ...this.routed, traces };
