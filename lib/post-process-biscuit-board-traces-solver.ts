@@ -131,6 +131,7 @@ export const getTraceClearanceViolations = (
   prepared: PreparedBiscuitRoutingProblem,
   solution: BiscuitBoardRoutingSolution,
   clearance = getEffectiveTraceClearance(prepared),
+  respectObstacleRotation = true,
 ): TraceClearanceViolation[] => {
   const contexts = getTraceContexts(prepared, solution);
   const segmentsByTrace = contexts.map((context) => getSegments(context.trace));
@@ -152,6 +153,7 @@ export const getTraceClearanceViolations = (
         const expanded = obstacleBounds(
           obstacle,
           segment.start.width / 2 + clearance,
+          respectObstacleRotation,
         );
         if (
           segmentIntersectsRectInterior(segment.start, segment.end, expanded)
@@ -215,6 +217,7 @@ const createSegmentClearanceChecker = (
   solution: BiscuitBoardRoutingSolution,
   traceIndex: number,
   clearance: number,
+  respectObstacleRotation = true,
 ) => {
   const contexts = getTraceContexts(prepared, solution);
   const context = contexts[traceIndex]!;
@@ -240,7 +243,11 @@ const createSegmentClearanceChecker = (
         segmentIntersectsRectInterior(
           segment.start,
           segment.end,
-          obstacleBounds(obstacle, segment.start.width / 2 + clearance),
+          obstacleBounds(
+            obstacle,
+            segment.start.width / 2 + clearance,
+            respectObstacleRotation,
+          ),
         )
       ) {
         return false;
@@ -439,6 +446,129 @@ const cloneTraces = (traces: SimplifiedPcbTrace[]) =>
     route: trace.route.map((point) => ({ ...point })),
   }));
 
+const wirePathLength = (path: WirePoint[]) =>
+  path
+    .slice(1)
+    .reduce(
+      (total, point, index) =>
+        total + Math.hypot(point.x - path[index]!.x, point.y - path[index]!.y),
+      0,
+    );
+
+const repairRotatedObstacleClearance = (
+  prepared: PreparedBiscuitRoutingProblem,
+  solution: BiscuitBoardRoutingSolution,
+  clearance: number,
+) => {
+  const traces = cloneTraces(solution.traces);
+  const maximumRepairs = traces.reduce(
+    (count, trace) => count + getSegments(trace).length,
+    0,
+  );
+
+  for (let repairCount = 0; repairCount < maximumRepairs; repairCount++) {
+    let repaired = false;
+    const workingSolution = { ...solution, traces };
+    const contexts = getTraceContexts(prepared, workingSolution);
+
+    for (const [traceIndex, context] of contexts.entries()) {
+      const route = [...context.trace.route];
+      const segmentHasClearance = createSegmentClearanceChecker(
+        prepared,
+        workingSolution,
+        traceIndex,
+        clearance,
+      );
+
+      for (let pointIndex = 1; pointIndex < route.length; pointIndex++) {
+        const start = route[pointIndex - 1]!;
+        const end = route[pointIndex]!;
+        if (
+          start.route_type !== "wire" ||
+          end.route_type !== "wire" ||
+          start.layer !== end.layer ||
+          pointsEqual(start, end)
+        ) {
+          continue;
+        }
+        const segment = { start, end };
+        const blockingEntry = [...prepared.input.obstacles.entries()].find(
+          ([obstacleIndex, obstacle]) =>
+            Math.abs(obstacle.ccwRotationDegrees ?? 0) > EPSILON &&
+            !obstacle.isCopperPour &&
+            obstacle.layers.includes(start.layer) &&
+            !obstacleAllowsSegment(prepared, context, obstacleIndex, segment) &&
+            segmentIntersectsRectInterior(
+              start,
+              end,
+              obstacleBounds(obstacle, start.width / 2 + clearance),
+            ),
+        );
+        if (!blockingEntry) continue;
+
+        const [, obstacle] = blockingEntry;
+        const bounds = obstacleBounds(obstacle, start.width / 2 + clearance);
+        const nudge = 1e-4;
+        const candidatePointPaths: Point[][] = [
+          [
+            start,
+            { x: bounds.minX - nudge, y: start.y },
+            { x: bounds.minX - nudge, y: end.y },
+            end,
+          ],
+          [
+            start,
+            { x: bounds.maxX + nudge, y: start.y },
+            { x: bounds.maxX + nudge, y: end.y },
+            end,
+          ],
+          [
+            start,
+            { x: start.x, y: bounds.minY - nudge },
+            { x: end.x, y: bounds.minY - nudge },
+            end,
+          ],
+          [
+            start,
+            { x: start.x, y: bounds.maxY + nudge },
+            { x: end.x, y: bounds.maxY + nudge },
+            end,
+          ],
+        ];
+        const candidates = candidatePointPaths
+          .map((path) => collapseCollinearWirePoints(toWirePath(path, start)))
+          .filter((path) =>
+            path
+              .slice(1)
+              .every((point, index) =>
+                segmentHasClearance({ start: path[index]!, end: point }),
+              ),
+          )
+          .sort(
+            (left, right) =>
+              wirePathLength(left) - wirePathLength(right) ||
+              left.length - right.length,
+          );
+        const detour = candidates[0];
+        if (!detour) {
+          throw new Error(
+            `Could not detour trace "${context.route.routeId}" around rotated obstacle`,
+          );
+        }
+        route.splice(pointIndex - 1, 2, ...detour);
+        traces[traceIndex] = { ...context.trace, route };
+        repaired = true;
+        break;
+      }
+      if (repaired) break;
+    }
+
+    if (!repaired) return traces;
+  }
+
+  throw new Error("Rotated-obstacle trace repair exceeded its iteration limit");
+};
+
 export const postProcessBiscuitBoardTraces = (
   prepared: PreparedBiscuitRoutingProblem,
   solution: BiscuitBoardRoutingSolution,
@@ -448,6 +578,7 @@ export const postProcessBiscuitBoardTraces = (
     prepared,
     solution,
     clearance,
+    false,
   );
   if (initialViolations.length > 0) {
     throw new Error(
@@ -455,7 +586,7 @@ export const postProcessBiscuitBoardTraces = (
     );
   }
 
-  const traces = cloneTraces(solution.traces);
+  let traces = cloneTraces(solution.traces);
   const protectedJunctionKeys = new Set<string>();
   for (const route of solution.routes) {
     const demand = prepared.demandById.get(route.routeId)!;
@@ -495,6 +626,7 @@ export const postProcessBiscuitBoardTraces = (
         { ...solution, traces },
         traceIndex,
         clearance,
+        false,
       );
       traces[traceIndex] = {
         ...traces[traceIndex]!,
@@ -511,6 +643,11 @@ export const postProcessBiscuitBoardTraces = (
     );
     if (segmentCountAfterPass >= segmentCountBeforePass) break;
   }
+  traces = repairRotatedObstacleClearance(
+    prepared,
+    { ...solution, traces },
+    clearance,
+  );
   const postSimplificationSegmentCount = traces.reduce(
     (count, trace) => count + getSegments(trace).length,
     0,

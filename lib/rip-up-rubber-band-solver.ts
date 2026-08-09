@@ -116,8 +116,29 @@ const nearestTargetDistanceSquared = (
   return best;
 };
 
-const insertSortedUnique = (values: readonly string[], additions: string[]) =>
-  [...new Set([...values, ...additions])].sort();
+const insertSortedUnique = (values: string[], additions: string[]) => {
+  if (additions.length === 0) return values;
+  if (values.length === 0) return additions;
+  const merged: string[] = [];
+  let valueIndex = 0;
+  let additionIndex = 0;
+  while (valueIndex < values.length || additionIndex < additions.length) {
+    const value = values[valueIndex];
+    const addition = additions[additionIndex];
+    let next: string;
+    if (addition === undefined || (value !== undefined && value < addition)) {
+      next = values[valueIndex++]!;
+    } else if (value === undefined || addition < value) {
+      next = additions[additionIndex++]!;
+    } else {
+      next = value;
+      valueIndex++;
+      additionIndex++;
+    }
+    if (merged.at(-1) !== next) merged.push(next);
+  }
+  return merged;
+};
 
 const blockerSetHash = (blockers: readonly string[]) => {
   let hash = 2166136261;
@@ -1291,7 +1312,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
         !segmentIntersectsRectInterior(
           from,
           to,
-          obstacleBounds(obstacle, demand.width / 2 + clearance),
+          obstacleBounds(obstacle, demand.width / 2 + clearance, false),
         )
       ) {
         continue;

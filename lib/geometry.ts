@@ -27,14 +27,25 @@ export const obstacleBounds = (
     center: Point;
     width: number;
     height: number;
+    ccwRotationDegrees?: number;
   },
   margin = 0,
-): RectBounds => ({
-  minX: obstacle.center.x - obstacle.width / 2 - margin,
-  maxX: obstacle.center.x + obstacle.width / 2 + margin,
-  minY: obstacle.center.y - obstacle.height / 2 - margin,
-  maxY: obstacle.center.y + obstacle.height / 2 + margin,
-});
+  respectRotation = true,
+): RectBounds => {
+  const rotationRadians =
+    (((respectRotation ? obstacle.ccwRotationDegrees : 0) ?? 0) * Math.PI) /
+    180;
+  const cosine = Math.abs(Math.cos(rotationRadians));
+  const sine = Math.abs(Math.sin(rotationRadians));
+  const halfWidth = (cosine * obstacle.width + sine * obstacle.height) / 2;
+  const halfHeight = (sine * obstacle.width + cosine * obstacle.height) / 2;
+  return {
+    minX: obstacle.center.x - halfWidth - margin,
+    maxX: obstacle.center.x + halfWidth + margin,
+    minY: obstacle.center.y - halfHeight - margin,
+    maxY: obstacle.center.y + halfHeight + margin,
+  };
+};
 
 /** Liang-Barsky clipping against a slightly shrunken rectangle. */
 export const segmentIntersectsRectInterior = (
