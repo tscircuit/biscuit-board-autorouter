@@ -1,6 +1,11 @@
+import "bun-match-svg";
 import { expect, test } from "bun:test";
 import type { SimpleRouteJson } from "@tscircuit/core";
-import { generateBiscuitBoardHypergraph } from "../lib";
+import { getSvgFromGraphicsObject } from "graphics-debug";
+import {
+  BiscuitBoardRoutingPipelineSolver,
+  generateBiscuitBoardHypergraph,
+} from "../lib";
 import capturedInput from "../repros/fixtures/repro02-biscuit-board-rp2040.srj.json";
 
 const input = capturedInput as SimpleRouteJson;
@@ -29,3 +34,14 @@ test("preserves the exact BiscuitBoard RP2040 routing reproduction", () => {
     prepared.edges.filter((edge) => edge.kind === "fixed_via_transition"),
   ).toHaveLength(54);
 }, 30_000);
+
+test("matches the exact BiscuitBoard RP2040 repro02 routing input", async () => {
+  const solver = new BiscuitBoardRoutingPipelineSolver(input);
+  const svg = getSvgFromGraphicsObject(solver.initialVisualize(), {
+    backgroundColor: "white",
+    svgWidth: 1200,
+    svgHeight: 900,
+  });
+
+  await expect(svg).toMatchSvgSnapshot(import.meta.path);
+});
