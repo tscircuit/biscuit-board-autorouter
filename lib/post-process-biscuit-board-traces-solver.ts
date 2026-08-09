@@ -52,6 +52,8 @@ export interface TraceClearanceViolation {
 }
 
 const EPSILON = 1e-7;
+const junctionKey = (point: { x: number; y: number; layer: string }) =>
+  `${point.layer}:${point.x.toFixed(6)}:${point.y.toFixed(6)}`;
 
 export const getEffectiveTraceClearance = (
   prepared: PreparedBiscuitRoutingProblem,
@@ -101,6 +103,9 @@ const obstacleAllowsSegment = (
   segment: TraceSegment,
 ) => {
   const obstacle = prepared.input.obstacles[obstacleIndex]!;
+  const prefabViaId = obstacle.connectedTo.find((identifier) =>
+    identifier.startsWith("pcb_via"),
+  );
   const identifiers = [
     context.demand.connectionName,
     context.demand.netId,
@@ -114,8 +119,9 @@ const obstacleAllowsSegment = (
   }
   return (
     obstacle.netIsAssignable === true &&
-    obstacleHasPcbViaId(obstacle) &&
-    traceTraversesObstacle(context.trace, obstacle) &&
+    Boolean(prefabViaId) &&
+    (traceTraversesObstacle(context.trace, obstacle) ||
+      context.trace.connectsTo?.includes(prefabViaId!)) &&
     (pointsEqual(segment.start, obstacle.center) ||
       pointsEqual(segment.end, obstacle.center))
   );
@@ -378,6 +384,7 @@ const simplifyWireRun = (
 const simplifyTraceRoute = (
   route: SimplifiedPcbTrace["route"],
   segmentHasClearance: (segment: TraceSegment) => boolean,
+  protectedJunctionKeys: ReadonlySet<string>,
 ): SimplifiedPcbTrace["route"] => {
   const simplified: SimplifiedPcbTrace["route"] = [];
   let pointIndex = 0;
@@ -396,7 +403,31 @@ const simplifyTraceRoute = (
       run.push(next);
       runEndIndex++;
     }
-    simplified.push(...simplifyWireRun(run, segmentHasClearance));
+    if (run.length === 1) {
+      simplified.push(run[0]!);
+      pointIndex = runEndIndex;
+      continue;
+    }
+    let chunkStartIndex = 0;
+    for (let index = 1; index < run.length; index++) {
+      const isProtectedJunction = protectedJunctionKeys.has(
+        junctionKey(run[index]!),
+      );
+      if (index < run.length - 1 && !isProtectedJunction) continue;
+      const simplifiedChunk = simplifyWireRun(
+        run.slice(chunkStartIndex, index + 1),
+        segmentHasClearance,
+      );
+      const previous = simplified.at(-1);
+      simplified.push(
+        ...(previous?.route_type === "wire" &&
+        pointsEqual(previous, simplifiedChunk[0]!) &&
+        previous.layer === simplifiedChunk[0]!.layer
+          ? simplifiedChunk.slice(1)
+          : simplifiedChunk),
+      );
+      chunkStartIndex = index;
+    }
     pointIndex = runEndIndex;
   }
   return simplified;
@@ -425,6 +456,19 @@ export const postProcessBiscuitBoardTraces = (
   }
 
   const traces = cloneTraces(solution.traces);
+  const protectedJunctionKeys = new Set<string>();
+  for (const route of solution.routes) {
+    const demand = prepared.demandById.get(route.routeId)!;
+    for (const endpointNode of [route.nodePath[0], route.nodePath.at(-1)]) {
+      if (
+        endpointNode !== undefined &&
+        endpointNode !== demand.sourceNode &&
+        endpointNode !== demand.targetNode
+      ) {
+        protectedJunctionKeys.add(junctionKey(prepared.nodes[endpointNode]!));
+      }
+    }
+  }
   const preSimplificationSegmentCount = traces.reduce(
     (count, trace) => count + getSegments(trace).length,
     0,
@@ -457,6 +501,7 @@ export const postProcessBiscuitBoardTraces = (
         route: simplifyTraceRoute(
           traces[traceIndex]!.route,
           segmentHasClearance,
+          protectedJunctionKeys,
         ),
       };
     }

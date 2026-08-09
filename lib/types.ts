@@ -10,7 +10,11 @@ export interface RectBounds {
 }
 
 export interface BiscuitBoardAutorouterOptions {
-  routeOrder?: "longest_first" | "shortest_first" | "input";
+  routeOrder?:
+    | "longest_first"
+    | "shortest_first"
+    | "signal_longest_first"
+    | "input";
   gridPitch?: number;
   /** Minimum edge-to-edge copper clearance used by graph generation and cleanup. */
   gridClearance?: number;
@@ -26,7 +30,11 @@ export interface BiscuitBoardAutorouterOptions {
 }
 
 export interface NormalizedBiscuitBoardAutorouterOptions {
-  routeOrder: "longest_first" | "shortest_first" | "input";
+  routeOrder:
+    | "longest_first"
+    | "shortest_first"
+    | "signal_longest_first"
+    | "input";
   gridPitch: number;
   gridClearance: number;
   viaTransitionCost: number;
@@ -61,6 +69,9 @@ export type RoutingEdge =
       cost: number;
       blockingObstacleIndexes: number[];
       conflictEdgeIds: number[];
+      restrictedToConnectionName?: string;
+      restrictedGuideOrder?: number;
+      restrictedGuideCount?: number;
     }
   | {
       edgeId: number;

@@ -29,13 +29,13 @@ test("solves the exact BiscuitBoard STM32C071 real-project input", () => {
   expect(solver.solved).toBe(true);
   const output = solver.getOutput();
   expect(output).not.toBeNull();
-  // The 17 original branch demands need two additional same-net Steiner
-  // bridges after rip-and-replace to keep every terminal component connected.
-  expect(output!.traces).toHaveLength(19);
+  // Same-layer crossings between branches are physical copper connections,
+  // even when the sparse graph does not place a node at the intersection.
+  expect(output!.traces).toHaveLength(17);
   expect(output!.stats.postProcessedClearance).toBe(0.2);
   expect(output!.stats.preSimplificationSegmentCount).toBeGreaterThan(0);
   expect(output!.stats.postSimplificationSegmentCount).toBeLessThan(
-    output!.stats.preSimplificationSegmentCount! * 0.4,
+    output!.stats.preSimplificationSegmentCount! * 0.5,
   );
   expect(output!.stats.fixedViaTransitionCount).toBe(0);
   const prepared = solver.getStageOutput<PreparedBiscuitRoutingProblem>(
