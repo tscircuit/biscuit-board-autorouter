@@ -360,47 +360,76 @@ const addConflictPairs = (
       edge.kind === "trace",
   );
   const bucketSize = 2;
-  const buckets = new Map<string, number[]>();
-  const getBucketKey = (layer: string, x: number, y: number) =>
-    `${layer}:${x}:${y}`;
+  const buckets = new Map<number, number[]>();
+  const layerIndexByName = new Map<string, number>();
+  const getBucketKey = (layer: string, x: number, y: number) => {
+    let layerIndex = layerIndexByName.get(layer);
+    if (layerIndex === undefined) {
+      layerIndex = layerIndexByName.size;
+      layerIndexByName.set(layer, layerIndex);
+    }
+    // Bucket coordinates are small (board-sized / 2), so an offset of 2^15
+    // keeps the packed key unique and positive.
+    return (layerIndex * 65536 + (x + 32768)) * 65536 + (y + 32768);
+  };
+  // Deduplicates bucket candidates without allocating a Set per edge; the
+  // visit order over buckets is unchanged, so conflict lists keep the exact
+  // ordering the string-keyed implementation produced.
+  const lastSeenByEdgeId = new Int32Array(edges.length).fill(-1);
+  // Segment bounding boxes for a cheap reject before the exact distance test:
+  // if two boxes are separated by more than the conflict radius on either
+  // axis, the segments cannot be within that radius.
+  const boundsByEdgeId = new Float64Array(edges.length * 4);
   for (const edge of traceEdges) {
     const from = nodes[edge.fromNode]!;
     const to = nodes[edge.toNode]!;
-    const minBucketX = Math.floor(
-      (Math.min(from.x, to.x) - minimumTraceCenterDistance) / bucketSize,
-    );
-    const maxBucketX = Math.floor(
-      (Math.max(from.x, to.x) + minimumTraceCenterDistance) / bucketSize,
-    );
-    const minBucketY = Math.floor(
-      (Math.min(from.y, to.y) - minimumTraceCenterDistance) / bucketSize,
-    );
-    const maxBucketY = Math.floor(
-      (Math.max(from.y, to.y) + minimumTraceCenterDistance) / bucketSize,
-    );
-    const candidateIds = new Set<number>();
+    const offset = edge.edgeId * 4;
+    boundsByEdgeId[offset] = Math.min(from.x, to.x);
+    boundsByEdgeId[offset + 1] = Math.max(from.x, to.x);
+    boundsByEdgeId[offset + 2] = Math.min(from.y, to.y);
+    boundsByEdgeId[offset + 3] = Math.max(from.y, to.y);
+  }
+  for (const edge of traceEdges) {
+    const from = nodes[edge.fromNode]!;
+    const to = nodes[edge.toNode]!;
+    const edgeMinX = Math.min(from.x, to.x) - minimumTraceCenterDistance;
+    const edgeMaxX = Math.max(from.x, to.x) + minimumTraceCenterDistance;
+    const edgeMinY = Math.min(from.y, to.y) - minimumTraceCenterDistance;
+    const edgeMaxY = Math.max(from.y, to.y) + minimumTraceCenterDistance;
+    const minBucketX = Math.floor(edgeMinX / bucketSize);
+    const maxBucketX = Math.floor(edgeMaxX / bucketSize);
+    const minBucketY = Math.floor(edgeMinY / bucketSize);
+    const maxBucketY = Math.floor(edgeMaxY / bucketSize);
     for (let x = minBucketX; x <= maxBucketX; x++) {
       for (let y = minBucketY; y <= maxBucketY; y++) {
-        for (const candidate of buckets.get(getBucketKey(from.layer, x, y)) ??
+        for (const candidateId of buckets.get(getBucketKey(from.layer, x, y)) ??
           []) {
-          candidateIds.add(candidate);
+          if (lastSeenByEdgeId[candidateId] === edge.edgeId) continue;
+          lastSeenByEdgeId[candidateId] = edge.edgeId;
+          const candidateOffset = candidateId * 4;
+          if (
+            boundsByEdgeId[candidateOffset]! > edgeMaxX ||
+            boundsByEdgeId[candidateOffset + 1]! < edgeMinX ||
+            boundsByEdgeId[candidateOffset + 2]! > edgeMaxY ||
+            boundsByEdgeId[candidateOffset + 3]! < edgeMinY
+          ) {
+            continue;
+          }
+          const candidate = edges[candidateId] as Extract<
+            RoutingEdge,
+            { kind: "trace" }
+          >;
+          const candidateFrom = nodes[candidate.fromNode]!;
+          const candidateTo = nodes[candidate.toNode]!;
+          if (
+            from.layer === candidateFrom.layer &&
+            segmentDistance(from, to, candidateFrom, candidateTo) <
+              minimumTraceCenterDistance - 1e-7
+          ) {
+            edge.conflictEdgeIds.push(candidateId);
+            candidate.conflictEdgeIds.push(edge.edgeId);
+          }
         }
-      }
-    }
-    for (const candidateId of candidateIds) {
-      const candidate = edges[candidateId] as Extract<
-        RoutingEdge,
-        { kind: "trace" }
-      >;
-      const candidateFrom = nodes[candidate.fromNode]!;
-      const candidateTo = nodes[candidate.toNode]!;
-      if (
-        from.layer === candidateFrom.layer &&
-        segmentDistance(from, to, candidateFrom, candidateTo) <
-          minimumTraceCenterDistance - 1e-7
-      ) {
-        edge.conflictEdgeIds.push(candidateId);
-        candidate.conflictEdgeIds.push(edge.edgeId);
       }
     }
     for (let x = minBucketX; x <= maxBucketX; x++) {
