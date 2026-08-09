@@ -18,7 +18,7 @@ test("preserves the exact BiscuitBoard RP2040 routing reproduction", () => {
 
   const prepared = generateBiscuitBoardHypergraph(input, {
     gridClearance: 0.1,
-    maxRipsPerRoute: 300,
+    maxRipsPerRoute: 1_000,
     maxTotalRips: 10_000,
   });
   expect(prepared.demands).toHaveLength(97);

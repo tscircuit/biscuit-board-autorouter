@@ -32,7 +32,7 @@ if (!["input", "longest_first", "shortest_first"].includes(routeOrder)) {
 
 const solver = new BiscuitBoardRoutingPipelineSolver(input, {
   gridClearance: 0.1,
-  maxRipsPerRoute: 300,
+  maxRipsPerRoute: 1_000,
   maxTotalRips: 10_000,
   routeOrder,
 });

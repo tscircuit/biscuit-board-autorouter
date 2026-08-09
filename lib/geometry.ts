@@ -1,4 +1,5 @@
 import type { GraphicsObject } from "graphics-debug";
+import type { SimpleRouteJson } from "@tscircuit/core";
 import type {
   Point,
   PreparedBiscuitRoutingProblem,
@@ -150,6 +151,89 @@ export const netColor = (name: string) => {
     hash = (hash * 31 + character.charCodeAt(0)) | 0;
   const hue = Math.abs(hash) % 360;
   return `hsl(${hue} 72% 42%)`;
+};
+
+export const visualizeSimpleRouteJsonInput = (
+  input: SimpleRouteJson,
+): GraphicsObject => {
+  const rects: NonNullable<GraphicsObject["rects"]> = [
+    {
+      center: {
+        x: (input.bounds.minX + input.bounds.maxX) / 2,
+        y: (input.bounds.minY + input.bounds.maxY) / 2,
+      },
+      width: input.bounds.maxX - input.bounds.minX,
+      height: input.bounds.maxY - input.bounds.minY,
+      fill: "rgba(255,255,255,0)",
+      stroke: "rgba(15,23,42,0.45)",
+      label: "routing bounds",
+    },
+  ];
+  const circles: NonNullable<GraphicsObject["circles"]> = [];
+  const points: NonNullable<GraphicsObject["points"]> = [];
+  const lines: NonNullable<GraphicsObject["lines"]> = [];
+
+  for (const [obstacleIndex, obstacle] of input.obstacles.entries()) {
+    if (obstacle.isCopperPour) continue;
+    const isPrefabricatedVia =
+      obstacle.netIsAssignable === true &&
+      obstacle.connectedTo.some((id) => id.startsWith("pcb_via"));
+    const label = isPrefabricatedVia
+      ? `prefabricated via · ${obstacle.obstacleId ?? obstacleIndex}`
+      : `obstacle · ${obstacle.obstacleId ?? obstacle.componentId ?? obstacleIndex}`;
+    if (obstacle.shape === "circle") {
+      circles.push({
+        center: obstacle.center,
+        radius: Math.max(obstacle.width, obstacle.height) / 2,
+        fill: isPrefabricatedVia
+          ? "rgba(14,165,233,0.35)"
+          : "rgba(239,68,68,0.22)",
+        stroke: isPrefabricatedVia ? "#0284c7" : "#b91c1c",
+        label,
+      });
+    } else {
+      rects.push({
+        center: obstacle.center,
+        width: obstacle.width,
+        height: obstacle.height,
+        fill: isPrefabricatedVia
+          ? "rgba(14,165,233,0.25)"
+          : "rgba(239,68,68,0.16)",
+        stroke: isPrefabricatedVia ? "#0284c7" : "#b91c1c",
+        label,
+      });
+    }
+  }
+
+  for (const connection of input.connections) {
+    const color = netColor(connection.name);
+    const [root, ...terminals] = connection.pointsToConnect;
+    if (!root) continue;
+    points.push({ ...root, color, label: `${connection.name} terminal` });
+    for (const terminal of terminals) {
+      points.push({
+        ...terminal,
+        color,
+        label: `${connection.name} terminal`,
+      });
+      lines.push({
+        points: [root, terminal],
+        strokeColor: color,
+        strokeWidth: 0.04,
+        strokeDash: [0.15, 0.1],
+        label: `${connection.name} unrouted`,
+      });
+    }
+  }
+
+  return {
+    coordinateSystem: "cartesian",
+    title: `Biscuit-board routing input (${input.connections.length} connections, ${input.obstacles.length} obstacles)`,
+    rects,
+    circles,
+    points,
+    lines,
+  };
 };
 
 export const visualizePreparedProblem = (

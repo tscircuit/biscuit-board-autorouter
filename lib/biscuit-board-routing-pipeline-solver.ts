@@ -9,6 +9,7 @@ import { BuildBiscuitBoardTracesSolver } from "./build-biscuit-board-traces-solv
 import { GenerateBiscuitBoardHypergraphSolver } from "./generate-biscuit-board-hypergraph-solver";
 import { PostProcessBiscuitBoardTracesSolver } from "./post-process-biscuit-board-traces-solver";
 import { RipUpRubberBandSolver } from "./rip-up-rubber-band-solver";
+import { visualizeSimpleRouteJsonInput } from "./geometry";
 import type {
   BiscuitBoardAutorouterOptions,
   BiscuitBoardRoutingSolution,
@@ -90,7 +91,7 @@ export class BiscuitBoardRoutingPipelineSolver extends BasePipelineSolver<Simple
   }
 
   override initialVisualize(): GraphicsObject {
-    return { title: "Biscuit-board routing input" };
+    return visualizeSimpleRouteJsonInput(this.inputProblem);
   }
 
   override getOutput(): BiscuitBoardRoutingSolution | null {

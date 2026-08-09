@@ -34,7 +34,7 @@ export default function Repro02Page() {
         createSolver={() =>
           new BiscuitBoardRoutingPipelineSolver(input, {
             gridClearance: 0.1,
-            maxRipsPerRoute: 300,
+            maxRipsPerRoute: 1_000,
             maxTotalRips: 10_000,
           })
         }

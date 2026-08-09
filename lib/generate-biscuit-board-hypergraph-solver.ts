@@ -8,6 +8,7 @@ import {
   segmentDistance,
   segmentIntersectsRectInterior,
   visualizePreparedProblem,
+  visualizeSimpleRouteJsonInput,
 } from "./geometry";
 import type {
   BiscuitBoardAutorouterOptions,
@@ -36,10 +37,10 @@ const DEFAULT_OPTIONS: NormalizedBiscuitBoardAutorouterOptions = {
   ripCost: 10,
   crossingCost: 0.25,
   historyIncrement: 4,
-  maxBlockersPerSearch: 12,
-  maxRipsPerRoute: 30,
-  maxTotalRips: 500,
-  maxSearchStates: 150_000,
+  maxBlockersPerSearch: 64,
+  maxRipsPerRoute: 1_000,
+  maxTotalRips: 10_000,
+  maxSearchStates: 500_000,
   expansionsPerStep: 300,
 };
 
@@ -733,6 +734,6 @@ export class GenerateBiscuitBoardHypergraphSolver extends BaseSolver {
   override visualize(): GraphicsObject {
     return this.output
       ? visualizePreparedProblem(this.output)
-      : { title: "Biscuit-board hypergraph has not been generated" };
+      : visualizeSimpleRouteJsonInput(this.input);
   }
 }

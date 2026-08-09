@@ -162,6 +162,9 @@ export class BuildBiscuitBoardTracesSolver extends BaseSolver {
   }
 
   override visualize(): GraphicsObject {
-    return visualizePreparedProblem(this.prepared, this.routed.routes);
+    return {
+      ...visualizePreparedProblem(this.prepared, this.routed.routes),
+      title: `Built and validated traces (${this.routed.routes.length} routes, ${this.output?.traces.length ?? 0} Circuit JSON traces)`,
+    };
   }
 }

@@ -92,6 +92,20 @@ const nearestTargetDistanceSquared = (
 const insertSortedUnique = (values: readonly string[], additions: string[]) =>
   [...new Set([...values, ...additions])].sort();
 
+const blockerSetHash = (blockers: readonly string[]) => {
+  let hash = 2166136261;
+  for (const blocker of blockers) {
+    for (let index = 0; index < blocker.length; index++) {
+      hash ^= blocker.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+  }
+  // Two lossy blocker-state buckets per graph node bound the A* state count
+  // while retaining an alternate rip set, following tiny-hypergraph's use of
+  // lossy segment hashes for congestion state.
+  return hash & 1;
+};
+
 const deterministicOrderKey = (value: string, pass: number) => {
   let hash = (2166136261 ^ pass) >>> 0;
   for (let index = 0; index < value.length; index++) {
@@ -174,7 +188,10 @@ export class RipUpRubberBandSolver extends BaseSolver {
         this.uncommitRoute(demand.routeId);
         if (this.failed) return;
       }
-      this.activeSearch = this.createSearch(demand, false);
+      this.activeSearch = this.createSearch(
+        demand,
+        this.negotiationPassCount > 0,
+      );
     }
 
     for (
@@ -255,7 +272,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
         },
       ],
       open,
-      bestCostByState: new Map([[this.stateKey(sourceNode, null), 0]]),
+      bestCostByState: new Map([[this.stateKey(sourceNode, null, []), 0]]),
       expanded: 0,
     };
   }
@@ -305,14 +322,23 @@ export class RipUpRubberBandSolver extends BaseSolver {
     return [...componentsByRoot.values()];
   }
 
-  private stateKey(graphNode: number, edgeFromParent: number | null) {
+  private stateKey(
+    graphNode: number,
+    edgeFromParent: number | null,
+    blockers: readonly string[],
+  ) {
     const node = this.prepared.nodes[graphNode]!;
-    if (node.kind !== "fixed_via") return String(graphNode);
     const arrivalKind =
-      edgeFromParent === null
-        ? "start"
-        : this.prepared.edges[edgeFromParent]!.kind;
-    return `${graphNode}:${arrivalKind}`;
+      node.kind !== "fixed_via"
+        ? ""
+        : `:${
+            edgeFromParent === null
+              ? "start"
+              : this.prepared.edges[edgeFromParent]!.kind
+          }`;
+    return `${graphNode}${arrivalKind}:${
+      blockers.length === 0 ? "clear" : blockerSetHash(blockers)
+    }`;
   }
 
   private heuristic(fromNode: number, toNode: number) {
@@ -356,14 +382,25 @@ export class RipUpRubberBandSolver extends BaseSolver {
         this.activeSearch = this.createSearch(search.demand, true);
         return;
       }
+      const exhaustedRouteCount = [...this.ripCountByRoute.values()].filter(
+        (ripCount) => ripCount >= this.prepared.options.maxRipsPerRoute,
+      ).length;
       this.fail(
-        `No fixed-via route found for "${search.demand.routeId}" with at most ${this.prepared.options.maxBlockersPerSearch} blockers`,
+        `No fixed-via route found for "${search.demand.routeId}" with at most ${this.prepared.options.maxBlockersPerSearch} blockers${
+          exhaustedRouteCount > 0
+            ? `; ${exhaustedRouteCount} existing route(s) exhausted their rip budget`
+            : ""
+        }`,
       );
       return;
     }
     const current = search.nodes[searchNodeIndex]!;
     const bestCost = search.bestCostByState.get(
-      this.stateKey(current.graphNode, current.edgeFromParent),
+      this.stateKey(
+        current.graphNode,
+        current.edgeFromParent,
+        current.blockers,
+      ),
     );
     if (bestCost === undefined || current.g > bestCost + 1e-9) return;
     search.expanded++;
@@ -432,14 +469,17 @@ export class RipUpRubberBandSolver extends BaseSolver {
       return;
     const presentCongestionCost =
       this.prepared.options.ripCost * (this.negotiationPassCount + 1) ** 2;
+    const newlyBlockedRouteCount = foreignOwners.filter(
+      (routeId) => !parent.blockers.includes(routeId),
+    ).length;
     const nextG =
       parent.g +
       edge.cost +
       (this.historyCostByEdge.get(edgeId) ?? 0) +
       (this.historyCostByNode.get(toNode) ?? 0) +
-      foreignOwners.length *
-        (presentCongestionCost + this.prepared.options.crossingCost);
-    const key = this.stateKey(toNode, edgeId);
+      newlyBlockedRouteCount * presentCongestionCost +
+      foreignOwners.length * this.prepared.options.crossingCost;
+    const key = this.stateKey(toNode, edgeId, nextBlockers);
     if (
       nextG >= (search.bestCostByState.get(key) ?? Number.POSITIVE_INFINITY)
     ) {
@@ -572,8 +612,8 @@ export class RipUpRubberBandSolver extends BaseSolver {
   private commitGoal(search: ActiveSearch, goalIndex: number) {
     const goal = search.nodes[goalIndex]!;
     // Keep the broad routing phase conflict-free. If repeated rip-and-replace
-    // reaches a small cycling tail, commit its negotiated paths and let the
-    // component repair phase repack only those remaining conflicts.
+    // reaches a small cycling tail, commit its negotiated paths and repack the
+    // remaining conflict components with Pathfinder history costs.
     const shouldRipImmediately =
       this.totalRipCount < this.prepared.demands.length * 2;
     if (
@@ -709,25 +749,18 @@ export class RipUpRubberBandSolver extends BaseSolver {
       return;
     }
 
-    // Repair one connected conflict component at a time. Independent
-    // crossings on opposite sides of a board should not destabilize each
-    // other during a local rubber-band operation.
-    const orderedConflictComponents = conflictComponents.sort(
-      (left, right) =>
-        left.length - right.length || left[0]!.localeCompare(right[0]!),
-    );
-    const conflictingRouteIds = new Set(
-      orderedConflictComponents[
-        this.negotiationPassCount % orderedConflictComponents.length
-      ]!,
-    );
+    // Pathfinder converges by releasing every currently overused resource in
+    // one pass. Repairing one crossing at a time can simply move the crossing
+    // into a component which was legal a moment earlier, especially around a
+    // shared RP2040 power tree.
+    const conflictingRouteIds = new Set(allConflictingRouteIds);
     const componentKey = [...conflictingRouteIds].sort().join("|");
     const componentAttempt =
       (this.conflictComponentAttemptCount.get(componentKey) ?? 0) + 1;
     this.conflictComponentAttemptCount.set(componentKey, componentAttempt);
-    if (conflictingRouteIds.size <= 8) {
+    if (conflictingRouteIds.size <= 16) {
       const haloRouteCount = Math.min(
-        4,
+        6,
         1 + Math.floor((componentAttempt - 1) / 2),
       );
       for (let index = 0; index < haloRouteCount; index++) {
@@ -739,21 +772,28 @@ export class RipUpRubberBandSolver extends BaseSolver {
     }
 
     this.negotiationPassCount++;
+    // Pathfinder-style history belongs on the congested resources, not every
+    // edge in a route which happened to touch a conflict. Penalizing whole
+    // routes makes long RP2040 power trees thrash instead of nudging the local
+    // crossing toward the neighboring free channel.
     for (const routeId of conflictingRouteIds) {
       const route = this.committed.get(routeId);
       for (const edgeId of route?.edgePath ?? []) {
+        const edge = this.prepared.edges[edgeId]!;
+        const demand = this.prepared.demandById.get(routeId)!;
+        if (this.getForeignOwners(edge, demand).length === 0) continue;
         this.historyCostByEdge.set(
           edgeId,
           (this.historyCostByEdge.get(edgeId) ?? 0) +
             this.prepared.options.historyIncrement,
         );
-      }
-      for (const nodeIndex of route?.nodePath ?? []) {
-        this.historyCostByNode.set(
-          nodeIndex,
-          (this.historyCostByNode.get(nodeIndex) ?? 0) +
-            this.prepared.options.historyIncrement,
-        );
+        for (const nodeIndex of [edge.fromNode, edge.toNode]) {
+          this.historyCostByNode.set(
+            nodeIndex,
+            (this.historyCostByNode.get(nodeIndex) ?? 0) +
+              this.prepared.options.historyIncrement,
+          );
+        }
       }
     }
     const routeIdsToReroute = [...conflictingRouteIds].sort();
@@ -793,8 +833,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
     if (isCompactRepair) {
       // Release a compact conflicting component before attempting repair. If
       // its routes are removed one at a time, the routes waiting to be
-      // rerouted still occupy every alternative corridor and the negotiation
-      // stalls in a local minimum (the RP2040 QFN escape is a compact example).
+      // rerouted still occupy every alternative corridor.
       for (const demand of rerouteDemands) this.uncommitRoute(demand.routeId);
       if (this.failed) return;
     }
@@ -983,6 +1022,12 @@ export class RipUpRubberBandSolver extends BaseSolver {
       parent.set(node, root);
       return root;
     };
+    const union = (netId: string, leftNode: number, rightNode: number) => {
+      const parent = getParent(netId);
+      const leftRoot = find(parent, leftNode);
+      const rightRoot = find(parent, rightNode);
+      if (leftRoot !== rightRoot) parent.set(rightRoot, leftRoot);
+    };
     for (const route of this.committed.values()) {
       const parent = getParent(route.netId);
       for (let index = 0; index < route.nodePath.length; index++) {
@@ -990,9 +1035,39 @@ export class RipUpRubberBandSolver extends BaseSolver {
         find(parent, node);
         if (index === 0) continue;
         const previous = route.nodePath[index - 1]!;
-        const previousRoot = find(parent, previous);
-        const nodeRoot = find(parent, node);
-        if (previousRoot !== nodeRoot) parent.set(nodeRoot, previousRoot);
+        union(route.netId, previous, node);
+      }
+    }
+
+    // The sparse visibility graph deliberately omits the Cartesian product of
+    // every feature-aligned X and Y coordinate. Consequently, two same-net
+    // traces can cross between graph nodes even though the emitted copper is
+    // physically connected. Treat exact same-layer segment intersections as
+    // connectivity; nearby parallel traces still remain separate.
+    for (const route of this.committed.values()) {
+      for (const edgeId of route.edgePath) {
+        const edge = this.prepared.edges[edgeId]!;
+        if (edge.kind !== "trace") continue;
+        const from = this.prepared.nodes[edge.fromNode]!;
+        const to = this.prepared.nodes[edge.toNode]!;
+        for (const candidateEdgeId of edge.conflictEdgeIds) {
+          const candidateEdge = this.prepared.edges[candidateEdgeId]!;
+          if (candidateEdge.kind !== "trace") continue;
+          const candidateFrom = this.prepared.nodes[candidateEdge.fromNode]!;
+          const candidateTo = this.prepared.nodes[candidateEdge.toNode]!;
+          if (
+            from.layer !== candidateFrom.layer ||
+            segmentDistance(from, to, candidateFrom, candidateTo) > 1e-7
+          ) {
+            continue;
+          }
+          for (const candidateRouteId of this.edgeOwners.get(candidateEdgeId) ??
+            []) {
+            const candidateRoute = this.committed.get(candidateRouteId);
+            if (candidateRoute?.netId !== route.netId) continue;
+            union(route.netId, edge.fromNode, candidateEdge.fromNode);
+          }
+        }
       }
     }
     return this.prepared.demands.filter((demand) => {
@@ -1054,9 +1129,33 @@ export class RipUpRubberBandSolver extends BaseSolver {
       this.prepared,
       this.committed.values(),
     );
+    const conflictLines: NonNullable<GraphicsObject["lines"]> = [];
+    for (const route of this.committed.values()) {
+      const demand = this.prepared.demandById.get(route.routeId);
+      if (!demand) continue;
+      for (const edgeId of route.edgePath) {
+        const edge = this.prepared.edges[edgeId]!;
+        if (
+          edge.kind !== "trace" ||
+          this.getForeignOwners(edge, demand).length === 0
+        ) {
+          continue;
+        }
+        conflictLines.push({
+          points: [
+            this.prepared.nodes[edge.fromNode]!,
+            this.prepared.nodes[edge.toNode]!,
+          ],
+          strokeColor: "#dc2626",
+          strokeWidth: Math.max(0.26, demand.width + 0.08),
+          label: `clearance conflict · ${route.routeId}`,
+        });
+      }
+    }
     return {
       ...graphics,
-      title: `Rip-and-replace fixed-via router (${this.committed.size}/${this.prepared.demandById.size}, ${this.totalRipCount} rips)`,
+      title: `Rip-and-replace fixed-via router (${this.committed.size}/${this.prepared.demandById.size}, ${this.totalRipCount} rips, ${conflictLines.length} conflict edges)`,
+      lines: [...(graphics.lines ?? []), ...conflictLines],
     };
   }
 
