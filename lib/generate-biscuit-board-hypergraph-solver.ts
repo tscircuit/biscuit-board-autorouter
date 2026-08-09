@@ -188,7 +188,13 @@ const nodeIsBlocked = (
     ) {
       return false;
     }
-    return pointStrictlyInsideRect(point, obstacleBounds(obstacle, margin));
+    // Preserve the established sparse graph topology here. Exact rotated
+    // envelopes are applied after simplification, where a local detour does
+    // not force an unrelated whole-board rip-up negotiation.
+    return pointStrictlyInsideRect(
+      point,
+      obstacleBounds(obstacle, margin, false),
+    );
   });
 
 const getBlockingObstacleIndexes = (
@@ -203,7 +209,7 @@ const getBlockingObstacleIndexes = (
     return segmentIntersectsRectInterior(
       start,
       end,
-      obstacleBounds(obstacle, margin),
+      obstacleBounds(obstacle, margin, false),
     )
       ? [obstacleIndex]
       : [];
@@ -516,7 +522,7 @@ export const generateBiscuitBoardHypergraph = (
   const guidedTerminalKeys = new Set<string>();
   for (const obstacle of input.obstacles) {
     if (obstacle.isCopperPour || obstacle.netIsAssignable) continue;
-    const bounds = obstacleBounds(obstacle, maximumTraceMargin);
+    const bounds = obstacleBounds(obstacle, maximumTraceMargin, false);
     verticalSweepCoordinates.push(bounds.minX, bounds.maxX);
     horizontalSweepCoordinates.push(bounds.minY, bounds.maxY);
     specialPoints.push(
@@ -563,7 +569,7 @@ export const generateBiscuitBoardHypergraph = (
         if (obstacle.isCopperPour || !matchesConnection) {
           continue;
         }
-        const bounds = obstacleBounds(obstacle, maximumTraceMargin);
+        const bounds = obstacleBounds(obstacle, maximumTraceMargin, false);
         const escapePoints = [
           { x: bounds.minX, y: point.y },
           { x: bounds.maxX, y: point.y },

@@ -1312,7 +1312,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
         !segmentIntersectsRectInterior(
           from,
           to,
-          obstacleBounds(obstacle, demand.width / 2 + clearance),
+          obstacleBounds(obstacle, demand.width / 2 + clearance, false),
         )
       ) {
         continue;

@@ -6672,6 +6672,20 @@
         },
         {
           "route_type": "wire",
+          "x": -29.175099999999997,
+          "y": -4.5,
+          "width": 0.1,
+          "layer": "top"
+        },
+        {
+          "route_type": "wire",
+          "x": -29.175099999999997,
+          "y": -8.75,
+          "width": 0.1,
+          "layer": "top"
+        },
+        {
+          "route_type": "wire",
           "x": -28.9,
           "y": -8.75,
           "width": 0.1,
@@ -6716,6 +6730,20 @@
           "route_type": "wire",
           "x": -24.97,
           "y": -17.5,
+          "width": 0.1,
+          "layer": "bottom"
+        },
+        {
+          "route_type": "wire",
+          "x": -25.0751,
+          "y": -17.5,
+          "width": 0.1,
+          "layer": "bottom"
+        },
+        {
+          "route_type": "wire",
+          "x": -25.0751,
+          "y": -4.969999999999999,
           "width": 0.1,
           "layer": "bottom"
         },
@@ -7450,6 +7478,6 @@
     "conflictRouteCount": 0,
     "postProcessedClearance": 0.1,
     "preSimplificationSegmentCount": 1304,
-    "postSimplificationSegmentCount": 440
+    "postSimplificationSegmentCount": 444
   }
 }

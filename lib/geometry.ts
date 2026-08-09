@@ -30,8 +30,11 @@ export const obstacleBounds = (
     ccwRotationDegrees?: number;
   },
   margin = 0,
+  respectRotation = true,
 ): RectBounds => {
-  const rotationRadians = ((obstacle.ccwRotationDegrees ?? 0) * Math.PI) / 180;
+  const rotationRadians =
+    (((respectRotation ? obstacle.ccwRotationDegrees : 0) ?? 0) * Math.PI) /
+    180;
   const cosine = Math.abs(Math.cos(rotationRadians));
   const sine = Math.abs(Math.sin(rotationRadians));
   const halfWidth = (cosine * obstacle.width + sine * obstacle.height) / 2;
