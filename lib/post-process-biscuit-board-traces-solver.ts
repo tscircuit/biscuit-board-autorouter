@@ -459,11 +459,16 @@ const repairRotatedObstacleClearance = (
   prepared: PreparedBiscuitRoutingProblem,
   solution: BiscuitBoardRoutingSolution,
   clearance: number,
+  fallbackTraces: SimplifiedPcbTrace[] = [],
 ) => {
   const traces = cloneTraces(solution.traces);
-  const maximumRepairs = traces.reduce(
-    (count, trace) => count + getSegments(trace).length,
-    0,
+  const restoredTraceIndexes = new Set<number>();
+  const maximumRepairs = Math.max(
+    traces.reduce((count, trace) => count + getSegments(trace).length, 0),
+    fallbackTraces.reduce(
+      (count, trace) => count + getSegments(trace).length,
+      0,
+    ),
   );
 
   for (let repairCount = 0; repairCount < maximumRepairs; repairCount++) {
@@ -509,53 +514,171 @@ const repairRotatedObstacleClearance = (
         const [, obstacle] = blockingEntry;
         const bounds = obstacleBounds(obstacle, start.width / 2 + clearance);
         const nudge = 1e-4;
-        const candidatePointPaths: Point[][] = [
-          [
-            start,
-            { x: bounds.minX - nudge, y: start.y },
-            { x: bounds.minX - nudge, y: end.y },
-            end,
-          ],
-          [
-            start,
-            { x: bounds.maxX + nudge, y: start.y },
-            { x: bounds.maxX + nudge, y: end.y },
-            end,
-          ],
-          [
-            start,
-            { x: start.x, y: bounds.minY - nudge },
-            { x: end.x, y: bounds.minY - nudge },
-            end,
-          ],
-          [
-            start,
-            { x: start.x, y: bounds.maxY + nudge },
-            { x: end.x, y: bounds.maxY + nudge },
-            end,
-          ],
-        ];
-        const candidates = candidatePointPaths
-          .map((path) => collapseCollinearWirePoints(toWirePath(path, start)))
-          .filter((path) =>
-            path
-              .slice(1)
-              .every((point, index) =>
-                segmentHasClearance({ start: path[index]!, end: point }),
-              ),
-          )
-          .sort(
-            (left, right) =>
-              wirePathLength(left) - wirePathLength(right) ||
-              left.length - right.length,
-          );
-        const detour = candidates[0];
+        const detourStep = Math.max(clearance, start.width / 2, 0.05);
+        const maximumDetourDistance = Math.max(
+          prepared.options.gridPitch * 4,
+          2,
+        );
+        const detourOffsets = Array.from(
+          { length: Math.ceil(maximumDetourDistance / detourStep) + 1 },
+          (_, index) => nudge + index * detourStep,
+        );
+        const createCandidatePointPaths = (
+          candidateStart: WirePoint,
+          candidateEnd: WirePoint,
+        ): Point[][] =>
+          detourOffsets.flatMap((offset) => {
+            const left = bounds.minX - offset;
+            const right = bounds.maxX + offset;
+            const bottom = bounds.minY - offset;
+            const top = bounds.maxY + offset;
+            const firstX = candidateStart.x <= candidateEnd.x ? left : right;
+            const secondX = candidateStart.x <= candidateEnd.x ? right : left;
+            const firstY = candidateStart.y <= candidateEnd.y ? bottom : top;
+            const secondY = candidateStart.y <= candidateEnd.y ? top : bottom;
+            return [
+              [
+                candidateStart,
+                { x: left, y: candidateStart.y },
+                { x: left, y: candidateEnd.y },
+                candidateEnd,
+              ],
+              [
+                candidateStart,
+                { x: right, y: candidateStart.y },
+                { x: right, y: candidateEnd.y },
+                candidateEnd,
+              ],
+              [
+                candidateStart,
+                { x: candidateStart.x, y: bottom },
+                { x: candidateEnd.x, y: bottom },
+                candidateEnd,
+              ],
+              [
+                candidateStart,
+                { x: candidateStart.x, y: top },
+                { x: candidateEnd.x, y: top },
+                candidateEnd,
+              ],
+              [
+                candidateStart,
+                { x: firstX, y: candidateStart.y },
+                { x: firstX, y: bottom },
+                { x: secondX, y: bottom },
+                { x: secondX, y: candidateEnd.y },
+                candidateEnd,
+              ],
+              [
+                candidateStart,
+                { x: firstX, y: candidateStart.y },
+                { x: firstX, y: top },
+                { x: secondX, y: top },
+                { x: secondX, y: candidateEnd.y },
+                candidateEnd,
+              ],
+              [
+                candidateStart,
+                { x: candidateStart.x, y: firstY },
+                { x: left, y: firstY },
+                { x: left, y: secondY },
+                { x: candidateEnd.x, y: secondY },
+                candidateEnd,
+              ],
+              [
+                candidateStart,
+                { x: candidateStart.x, y: firstY },
+                { x: right, y: firstY },
+                { x: right, y: secondY },
+                { x: candidateEnd.x, y: secondY },
+                candidateEnd,
+              ],
+            ];
+          });
+        const boardMargin =
+          (prepared.input.minBoardEdgeClearance ?? 0) + start.width / 2;
+        const getValidDetours = (
+          candidateStart: WirePoint,
+          candidateEnd: WirePoint,
+        ) =>
+          createCandidatePointPaths(candidateStart, candidateEnd)
+            .filter((path) =>
+              path
+                .slice(1, -1)
+                .every(
+                  (point) =>
+                    point.x >= prepared.input.bounds.minX + boardMargin &&
+                    point.x <= prepared.input.bounds.maxX - boardMargin &&
+                    point.y >= prepared.input.bounds.minY + boardMargin &&
+                    point.y <= prepared.input.bounds.maxY - boardMargin,
+                ),
+            )
+            .map((path) =>
+              collapseCollinearWirePoints(toWirePath(path, candidateStart)),
+            )
+            .filter((path) =>
+              path
+                .slice(1)
+                .every((point, index) =>
+                  segmentHasClearance({ start: path[index]!, end: point }),
+                ),
+            )
+            .sort(
+              (left, right) =>
+                wirePathLength(left) - wirePathLength(right) ||
+                left.length - right.length,
+            );
+
+        let detour = getValidDetours(start, end)[0];
+        let detourStartIndex = pointIndex - 1;
+        let detourEndIndex = pointIndex;
         if (!detour) {
+          for (let spanSize = 1; spanSize <= 8 && !detour; spanSize++) {
+            for (let before = 0; before <= spanSize; before++) {
+              const after = spanSize - before;
+              const startIndex = pointIndex - 1 - before;
+              const endIndex = pointIndex + after;
+              if (startIndex < 0 || endIndex >= route.length) continue;
+              const span = route.slice(startIndex, endIndex + 1);
+              if (
+                !span.every(
+                  (point) =>
+                    point.route_type === "wire" && point.layer === start.layer,
+                )
+              ) {
+                continue;
+              }
+              const spanStart = span[0] as WirePoint;
+              const spanEnd = span.at(-1) as WirePoint;
+              detour = getValidDetours(spanStart, spanEnd)[0];
+              if (detour) {
+                detourStartIndex = startIndex;
+                detourEndIndex = endIndex;
+                break;
+              }
+            }
+          }
+        }
+        if (!detour) {
+          const fallbackTrace = fallbackTraces[traceIndex];
+          if (fallbackTrace && !restoredTraceIndexes.has(traceIndex)) {
+            traces[traceIndex] = {
+              ...fallbackTrace,
+              route: fallbackTrace.route.map((point) => ({ ...point })),
+            };
+            restoredTraceIndexes.add(traceIndex);
+            repaired = true;
+            break;
+          }
           throw new Error(
             `Could not detour trace "${context.route.routeId}" around rotated obstacle`,
           );
         }
-        route.splice(pointIndex - 1, 2, ...detour);
+        route.splice(
+          detourStartIndex,
+          detourEndIndex - detourStartIndex + 1,
+          ...detour,
+        );
         traces[traceIndex] = { ...context.trace, route };
         repaired = true;
         break;
@@ -569,16 +692,253 @@ const repairRotatedObstacleClearance = (
   throw new Error("Rotated-obstacle trace repair exceeded its iteration limit");
 };
 
+const repairTraceClearance = (
+  prepared: PreparedBiscuitRoutingProblem,
+  solution: BiscuitBoardRoutingSolution,
+  clearance: number,
+) => {
+  const traces = cloneTraces(solution.traces);
+  const maximumRepairs = traces.reduce(
+    (count, trace) => count + getSegments(trace).length,
+    0,
+  );
+
+  for (let repairCount = 0; repairCount < maximumRepairs; repairCount++) {
+    const workingSolution = { ...solution, traces };
+    const contexts = getTraceContexts(prepared, workingSolution);
+    let repaired = false;
+
+    for (let firstIndex = 0; firstIndex < contexts.length; firstIndex++) {
+      const first = contexts[firstIndex]!;
+      for (
+        let secondIndex = firstIndex + 1;
+        secondIndex < contexts.length;
+        secondIndex++
+      ) {
+        const second = contexts[secondIndex]!;
+        if (first.demand.netId === second.demand.netId) continue;
+
+        for (
+          let firstPointIndex = 1;
+          firstPointIndex < first.trace.route.length;
+          firstPointIndex++
+        ) {
+          const firstStart = first.trace.route[firstPointIndex - 1]!;
+          const firstEnd = first.trace.route[firstPointIndex]!;
+          if (
+            firstStart.route_type !== "wire" ||
+            firstEnd.route_type !== "wire" ||
+            firstStart.layer !== firstEnd.layer ||
+            pointsEqual(firstStart, firstEnd)
+          ) {
+            continue;
+          }
+
+          for (
+            let secondPointIndex = 1;
+            secondPointIndex < second.trace.route.length;
+            secondPointIndex++
+          ) {
+            const secondStart = second.trace.route[secondPointIndex - 1]!;
+            const secondEnd = second.trace.route[secondPointIndex]!;
+            if (
+              secondStart.route_type !== "wire" ||
+              secondEnd.route_type !== "wire" ||
+              secondStart.layer !== secondEnd.layer ||
+              firstStart.layer !== secondStart.layer ||
+              pointsEqual(secondStart, secondEnd)
+            ) {
+              continue;
+            }
+            const minimumCenterDistance =
+              firstStart.width / 2 + secondStart.width / 2 + clearance;
+            if (
+              segmentDistance(firstStart, firstEnd, secondStart, secondEnd) >=
+              minimumCenterDistance - EPSILON
+            ) {
+              continue;
+            }
+
+            const attempts = [
+              {
+                traceIndex: firstIndex,
+                pointIndex: firstPointIndex,
+                movingStart: firstStart,
+                movingEnd: firstEnd,
+                blockingStart: secondStart,
+                blockingEnd: secondEnd,
+              },
+              {
+                traceIndex: secondIndex,
+                pointIndex: secondPointIndex,
+                movingStart: secondStart,
+                movingEnd: secondEnd,
+                blockingStart: firstStart,
+                blockingEnd: firstEnd,
+              },
+            ];
+
+            for (const attempt of attempts) {
+              const margin =
+                attempt.movingStart.width / 2 +
+                attempt.blockingStart.width / 2 +
+                clearance +
+                1e-4;
+              const bounds = {
+                minX:
+                  Math.min(attempt.blockingStart.x, attempt.blockingEnd.x) -
+                  margin,
+                maxX:
+                  Math.max(attempt.blockingStart.x, attempt.blockingEnd.x) +
+                  margin,
+                minY:
+                  Math.min(attempt.blockingStart.y, attempt.blockingEnd.y) -
+                  margin,
+                maxY:
+                  Math.max(attempt.blockingStart.y, attempt.blockingEnd.y) +
+                  margin,
+              };
+              const candidatePointPaths: Point[][] = [
+                [
+                  attempt.movingStart,
+                  { x: bounds.minX, y: attempt.movingStart.y },
+                  { x: bounds.minX, y: attempt.movingEnd.y },
+                  attempt.movingEnd,
+                ],
+                [
+                  attempt.movingStart,
+                  { x: bounds.maxX, y: attempt.movingStart.y },
+                  { x: bounds.maxX, y: attempt.movingEnd.y },
+                  attempt.movingEnd,
+                ],
+                [
+                  attempt.movingStart,
+                  { x: attempt.movingStart.x, y: bounds.minY },
+                  { x: attempt.movingEnd.x, y: bounds.minY },
+                  attempt.movingEnd,
+                ],
+                [
+                  attempt.movingStart,
+                  { x: attempt.movingStart.x, y: bounds.maxY },
+                  { x: attempt.movingEnd.x, y: bounds.maxY },
+                  attempt.movingEnd,
+                ],
+              ];
+              for (const escapeDistance of [
+                margin + 0.1,
+                margin + 0.3,
+                margin + 0.6,
+              ]) {
+                for (const offset of [
+                  { x: escapeDistance, y: 0 },
+                  { x: -escapeDistance, y: 0 },
+                  { x: 0, y: escapeDistance },
+                  { x: 0, y: -escapeDistance },
+                ]) {
+                  candidatePointPaths.push(
+                    [
+                      attempt.movingStart,
+                      {
+                        x: attempt.movingStart.x + offset.x,
+                        y: attempt.movingStart.y + offset.y,
+                      },
+                      attempt.movingEnd,
+                    ],
+                    [
+                      attempt.movingStart,
+                      {
+                        x: attempt.movingEnd.x + offset.x,
+                        y: attempt.movingEnd.y + offset.y,
+                      },
+                      attempt.movingEnd,
+                    ],
+                  );
+                }
+              }
+              const boardMargin =
+                (prepared.input.minBoardEdgeClearance ?? 0) +
+                attempt.movingStart.width / 2;
+              const segmentHasClearance = createSegmentClearanceChecker(
+                prepared,
+                workingSolution,
+                attempt.traceIndex,
+                clearance,
+                false,
+              );
+              const candidates = candidatePointPaths
+                .map((path) =>
+                  collapseCollinearWirePoints(
+                    toWirePath(path, attempt.movingStart),
+                  ),
+                )
+                .filter((path) =>
+                  path.every(
+                    (point) =>
+                      point.x >= prepared.input.bounds.minX + boardMargin &&
+                      point.x <= prepared.input.bounds.maxX - boardMargin &&
+                      point.y >= prepared.input.bounds.minY + boardMargin &&
+                      point.y <= prepared.input.bounds.maxY - boardMargin,
+                  ),
+                )
+                .filter((path) =>
+                  path.slice(1).every((point, index) =>
+                    segmentHasClearance({
+                      start: path[index]!,
+                      end: point,
+                    }),
+                  ),
+                )
+                .sort(
+                  (left, right) =>
+                    wirePathLength(left) - wirePathLength(right) ||
+                    left.length - right.length,
+                );
+              const detour = candidates[0];
+              if (!detour) continue;
+
+              const route = [...traces[attempt.traceIndex]!.route];
+              route.splice(attempt.pointIndex - 1, 2, ...detour);
+              traces[attempt.traceIndex] = {
+                ...traces[attempt.traceIndex]!,
+                route,
+              };
+              repaired = true;
+              break;
+            }
+            if (repaired) break;
+          }
+          if (repaired) break;
+        }
+        if (repaired) break;
+      }
+      if (repaired) break;
+    }
+
+    if (!repaired) return traces;
+  }
+
+  throw new Error(
+    "Trace-to-trace clearance repair exceeded its iteration limit",
+  );
+};
+
 export const postProcessBiscuitBoardTraces = (
   prepared: PreparedBiscuitRoutingProblem,
   solution: BiscuitBoardRoutingSolution,
 ): BiscuitBoardRoutingSolution => {
   const clearance = getEffectiveTraceClearance(prepared);
+  let traces = repairTraceClearance(prepared, solution, clearance);
+  traces = repairRotatedObstacleClearance(
+    prepared,
+    { ...solution, traces },
+    clearance,
+  );
+  const repairedSolution = { ...solution, traces };
   const initialViolations = getTraceClearanceViolations(
     prepared,
-    solution,
+    repairedSolution,
     clearance,
-    false,
+    true,
   );
   if (initialViolations.length > 0) {
     throw new Error(
@@ -586,7 +946,7 @@ export const postProcessBiscuitBoardTraces = (
     );
   }
 
-  let traces = cloneTraces(solution.traces);
+  traces = cloneTraces(repairedSolution.traces);
   const protectedJunctionKeys = new Set<string>();
   for (const route of solution.routes) {
     const demand = prepared.demandById.get(route.routeId)!;
@@ -647,6 +1007,7 @@ export const postProcessBiscuitBoardTraces = (
     prepared,
     { ...solution, traces },
     clearance,
+    repairedSolution.traces,
   );
   const postSimplificationSegmentCount = traces.reduce(
     (count, trace) => count + getSegments(trace).length,

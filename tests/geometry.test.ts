@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import type { SimpleRouteJson } from "@tscircuit/core";
+import { generateBiscuitBoardHypergraph } from "../lib";
 import { obstacleBounds } from "../lib/geometry";
 
 test("obstacle bounds include rotation and clearance", () => {
@@ -34,4 +36,76 @@ test("obstacle bounds can preserve the routing graph's unrotated envelope", () =
   expect(bounds.maxX).toBeCloseTo(10.75);
   expect(bounds.minY).toBeCloseTo(-6.05);
   expect(bounds.maxY).toBeCloseTo(-3.95);
+});
+
+test("graph generation can reserve rotated obstacle envelopes", () => {
+  const input: SimpleRouteJson = {
+    bounds: { minX: 0, minY: 0, maxX: 10, maxY: 10 },
+    layerCount: 1,
+    minTraceWidth: 0.15,
+    minTraceToPadEdgeClearance: 0.1,
+    connections: [],
+    obstacles: [
+      {
+        type: "rect",
+        center: { x: 1, y: 5 },
+        width: 1.2,
+        height: 1.8,
+        ccwRotationDegrees: 270,
+        layers: ["top"],
+        connectedTo: [],
+      },
+    ],
+  };
+  const withoutRotation = generateBiscuitBoardHypergraph(input, {
+    gridPitch: 0.765,
+    gridClearance: 0.1,
+  });
+  const withRotation = generateBiscuitBoardHypergraph(input, {
+    gridPitch: 0.765,
+    gridClearance: 0.1,
+    respectObstacleRotationInGraph: true,
+  });
+  const hasRotatedEnvelopeSweepNode = (graph: typeof withRotation) =>
+    graph.nodes.some(
+      (node) =>
+        Math.abs(node.x - 2.075) < 1e-6 && Math.abs(node.y - 4.665) < 1e-6,
+    );
+
+  expect(hasRotatedEnvelopeSweepNode(withoutRotation)).toBe(false);
+  expect(hasRotatedEnvelopeSweepNode(withRotation)).toBe(true);
+});
+
+test("graph generation can reserve one selected rotated obstacle", () => {
+  const input: SimpleRouteJson = {
+    bounds: { minX: 0, minY: 0, maxX: 10, maxY: 10 },
+    layerCount: 1,
+    minTraceWidth: 0.2,
+    minTraceToPadEdgeClearance: 0.1,
+    connections: [],
+    obstacles: [
+      {
+        type: "rect",
+        center: { x: 5, y: 5 },
+        width: 1.2,
+        height: 1.8,
+        ccwRotationDegrees: 270,
+        layers: ["top"],
+        connectedTo: [],
+      },
+    ],
+  };
+
+  const graph = generateBiscuitBoardHypergraph(input, {
+    gridPitch: 0.765,
+    gridClearance: 0.1,
+    rotatedObstacleIndexesInGraph: [0],
+  });
+
+  expect(
+    graph.nodes.some(
+      (node) =>
+        Math.abs(node.x - 6.1) < 1e-6 && Math.abs(node.y - 4.69) < 1e-6,
+    ),
+  ).toBe(true);
 });

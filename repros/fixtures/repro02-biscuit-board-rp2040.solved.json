@@ -7477,7 +7477,7 @@
     "negotiationPassCount": 81,
     "conflictRouteCount": 0,
     "postProcessedClearance": 0.1,
-    "preSimplificationSegmentCount": 1304,
+    "preSimplificationSegmentCount": 1309,
     "postSimplificationSegmentCount": 444
   }
 }

@@ -38,3 +38,39 @@ test("connections sharing a terminal are routed as one electrical net", () => {
   expect(solver.failed).toBe(false);
   expect(solver.getOutput()!.traces).toHaveLength(2);
 });
+
+test("each shared-net trace still spans its declared endpoints", () => {
+  const input: SimpleRouteJson = {
+    bounds: { minX: 0, minY: 0, maxX: 10, maxY: 10 },
+    layerCount: 1,
+    minTraceWidth: 0.15,
+    obstacles: [],
+    connections: [
+      {
+        name: "outer-branch",
+        pointsToConnect: [
+          { x: 1, y: 5, layer: "top", pointId: "outer" },
+          { x: 9, y: 5, layer: "top", pointId: "shared" },
+        ],
+      },
+      {
+        name: "inner-branch",
+        pointsToConnect: [
+          { x: 5, y: 5, layer: "top", pointId: "inner" },
+          { x: 9, y: 5, layer: "top", pointId: "shared" },
+        ],
+      },
+    ],
+  };
+
+  const solver = new BiscuitBoardRoutingPipelineSolver(input, {
+    routeOrder: "input",
+  });
+  solver.solve();
+
+  expect(solver.solved).toBe(true);
+  expect(solver.failed).toBe(false);
+  expect(
+    solver.getOutput()!.traces.every((trace) => trace.route.length >= 2),
+  ).toBe(true);
+});

@@ -47,6 +47,28 @@ export const obstacleBounds = (
   };
 };
 
+/**
+ * Interior rotated obstacles can be repaired cheaply after routing, while an
+ * edge-adjacent obstacle may leave no room for a cleanup detour. Reserve the
+ * exact rotated envelope for those edge obstacles during graph routing.
+ */
+export const shouldRespectObstacleRotationInGraph = (
+  input: Pick<SimpleRouteJson, "bounds">,
+  obstacle: SimpleRouteJson["obstacles"][number],
+  margin: number,
+  enabled: boolean,
+  edgeDistance: number,
+) => {
+  if (!enabled) return false;
+  const bounds = obstacleBounds(obstacle, margin, true);
+  return (
+    bounds.minX - input.bounds.minX <= edgeDistance ||
+    input.bounds.maxX - bounds.maxX <= edgeDistance ||
+    bounds.minY - input.bounds.minY <= edgeDistance ||
+    input.bounds.maxY - bounds.maxY <= edgeDistance
+  );
+};
+
 /** Liang-Barsky clipping against a slightly shrunken rectangle. */
 export const segmentIntersectsRectInterior = (
   start: Point,
