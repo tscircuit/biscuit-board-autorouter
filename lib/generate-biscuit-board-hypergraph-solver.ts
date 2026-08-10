@@ -35,6 +35,7 @@ const DEFAULT_OPTIONS: NormalizedBiscuitBoardAutorouterOptions = {
   gridPitch: 1.5,
   gridClearance: 0.2,
   respectObstacleRotationInGraph: false,
+  rotatedObstacleIndexesInGraph: [],
   viaTransitionCost: 20,
   ripCost: 10,
   crossingCost: 0.25,
@@ -142,6 +143,22 @@ const obstacleIsOnLayer = (
   layer: string,
 ) => obstacle.layers.includes(layer);
 
+const graphUsesRotatedObstacleBounds = (
+  input: SimpleRouteJson,
+  obstacle: SimpleRouteJson["obstacles"][number],
+  obstacleIndex: number,
+  margin: number,
+  options: NormalizedBiscuitBoardAutorouterOptions,
+) =>
+  options.rotatedObstacleIndexesInGraph.includes(obstacleIndex) ||
+  shouldRespectObstacleRotationInGraph(
+    input,
+    obstacle,
+    margin,
+    options.respectObstacleRotationInGraph,
+    options.gridPitch,
+  );
+
 const getSpecialNodeMetadata = (
   input: SimpleRouteJson,
   prefabricatedVias: PrefabricatedVia[],
@@ -199,12 +216,12 @@ const nodeIsBlocked = (
       obstacleBounds(
         obstacle,
         margin,
-        shouldRespectObstacleRotationInGraph(
+        graphUsesRotatedObstacleBounds(
           input,
           obstacle,
+          obstacleIndex,
           margin,
-          options.respectObstacleRotationInGraph,
-          options.gridPitch,
+          options,
         ),
       ),
     );
@@ -226,12 +243,12 @@ const getBlockingObstacleIndexes = (
       obstacleBounds(
         obstacle,
         margin,
-        shouldRespectObstacleRotationInGraph(
+        graphUsesRotatedObstacleBounds(
           input,
           obstacle,
+          obstacleIndex,
           margin,
-          options.respectObstacleRotationInGraph,
-          options.gridPitch,
+          options,
         ),
       ),
     )
@@ -544,17 +561,17 @@ export const generateBiscuitBoardHypergraph = (
     reverseOrder: boolean;
   }> = [];
   const guidedTerminalKeys = new Set<string>();
-  for (const obstacle of input.obstacles) {
+  for (const [obstacleIndex, obstacle] of input.obstacles.entries()) {
     if (obstacle.isCopperPour || obstacle.netIsAssignable) continue;
     const bounds = obstacleBounds(
       obstacle,
       maximumTraceMargin,
-      shouldRespectObstacleRotationInGraph(
+      graphUsesRotatedObstacleBounds(
         input,
         obstacle,
+        obstacleIndex,
         maximumTraceMargin,
-        options.respectObstacleRotationInGraph,
-        options.gridPitch,
+        options,
       ),
     );
     verticalSweepCoordinates.push(bounds.minX, bounds.maxX);
@@ -593,7 +610,7 @@ export const generateBiscuitBoardHypergraph = (
         connection.rootConnectionName,
         point.pointId,
       ].filter((identifier): identifier is string => Boolean(identifier));
-      for (const obstacle of input.obstacles) {
+      for (const [obstacleIndex, obstacle] of input.obstacles.entries()) {
         const matchesConnection = terminalIdentifiers.some((identifier) =>
           obstacle.connectedTo.includes(identifier),
         );
@@ -606,12 +623,12 @@ export const generateBiscuitBoardHypergraph = (
         const bounds = obstacleBounds(
           obstacle,
           maximumTraceMargin,
-          shouldRespectObstacleRotationInGraph(
+          graphUsesRotatedObstacleBounds(
             input,
             obstacle,
+            obstacleIndex,
             maximumTraceMargin,
-            options.respectObstacleRotationInGraph,
-            options.gridPitch,
+            options,
           ),
         );
         const escapePoints = [

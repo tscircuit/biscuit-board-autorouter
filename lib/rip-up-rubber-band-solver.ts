@@ -1320,8 +1320,14 @@ export class RipUpRubberBandSolver extends BaseSolver {
               this.prepared.input,
               obstacle,
               demand.width / 2 + clearance,
-              this.prepared.options.respectObstacleRotationInGraph,
-              this.prepared.options.gridPitch,
+              this.prepared.options.rotatedObstacleIndexesInGraph.includes(
+                obstacleIndex,
+              ) || this.prepared.options.respectObstacleRotationInGraph,
+              this.prepared.options.rotatedObstacleIndexesInGraph.includes(
+                obstacleIndex,
+              )
+                ? Number.POSITIVE_INFINITY
+                : this.prepared.options.gridPitch,
             ),
           ),
         )

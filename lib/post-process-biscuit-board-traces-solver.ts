@@ -515,8 +515,12 @@ const repairRotatedObstacleClearance = (
         const bounds = obstacleBounds(obstacle, start.width / 2 + clearance);
         const nudge = 1e-4;
         const detourStep = Math.max(clearance, start.width / 2, 0.05);
+        const maximumDetourDistance = Math.max(
+          prepared.options.gridPitch * 4,
+          2,
+        );
         const detourOffsets = Array.from(
-          { length: 21 },
+          { length: Math.ceil(maximumDetourDistance / detourStep) + 1 },
           (_, index) => nudge + index * detourStep,
         );
         const createCandidatePointPaths = (
@@ -924,12 +928,17 @@ export const postProcessBiscuitBoardTraces = (
 ): BiscuitBoardRoutingSolution => {
   const clearance = getEffectiveTraceClearance(prepared);
   let traces = repairTraceClearance(prepared, solution, clearance);
+  traces = repairRotatedObstacleClearance(
+    prepared,
+    { ...solution, traces },
+    clearance,
+  );
   const repairedSolution = { ...solution, traces };
   const initialViolations = getTraceClearanceViolations(
     prepared,
     repairedSolution,
     clearance,
-    false,
+    true,
   );
   if (initialViolations.length > 0) {
     throw new Error(

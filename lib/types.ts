@@ -20,6 +20,8 @@ export interface BiscuitBoardAutorouterOptions {
   gridClearance?: number;
   /** Use rotated obstacle envelopes during graph generation instead of deferring them to cleanup. */
   respectObstacleRotationInGraph?: boolean;
+  /** Obstacle indexes whose rotated envelopes must be reserved during graph generation. */
+  rotatedObstacleIndexesInGraph?: number[];
   viaTransitionCost?: number;
   ripCost?: number;
   crossingCost?: number;
@@ -40,6 +42,7 @@ export interface NormalizedBiscuitBoardAutorouterOptions {
   gridPitch: number;
   gridClearance: number;
   respectObstacleRotationInGraph: boolean;
+  rotatedObstacleIndexesInGraph: number[];
   viaTransitionCost: number;
   ripCost: number;
   crossingCost: number;
