@@ -29,6 +29,8 @@ export interface BiscuitBoardAutorouterOptions {
   maxTotalRips?: number;
   maxSearchStates?: number;
   expansionsPerStep?: number;
+  /** Expand routed copper toward its nominal width after clearance cleanup. */
+  expandTraces?: boolean;
 }
 
 export interface NormalizedBiscuitBoardAutorouterOptions {

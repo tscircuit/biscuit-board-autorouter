@@ -1,4 +1,5 @@
 import type { SimpleRouteJson, SimplifiedPcbTrace } from "@tscircuit/core";
+import { ConnectionNameResolver } from "@tscircuit/power-trace-expander";
 import { BaseSolver } from "@tscircuit/solver-utils";
 import type { GraphicsObject } from "graphics-debug";
 import { BuildBiscuitBoardTracesSolver } from "./build-biscuit-board-traces-solver";
@@ -104,6 +105,8 @@ const obstacleAllowsSegment = (
   context: TraceContext,
   obstacleIndex: number,
   segment: TraceSegment,
+  connectionNameResolver: ConnectionNameResolver,
+  allowAllSameNetCopper = false,
 ) => {
   const obstacle = prepared.input.obstacles[obstacleIndex]!;
   const prefabViaId = obstacle.connectedTo.find((identifier) =>
@@ -119,6 +122,23 @@ const obstacleAllowsSegment = (
     identifiers.some((identifier) => obstacle.connectedTo.includes(identifier))
   ) {
     return true;
+  }
+  if (allowAllSameNetCopper) {
+    const canonicalIdentifiers = new Set(
+      connectionNameResolver.canonicalize([
+        ...identifiers,
+        ...(context.demand.allowedConnectionNames ?? []),
+        context.trace.connection_name ?? "",
+        ...(context.trace.connectsTo ?? []),
+      ]),
+    );
+    if (
+      connectionNameResolver
+        .canonicalize(obstacle.connectedTo)
+        .some((identifier) => canonicalIdentifiers.has(identifier))
+    ) {
+      return true;
+    }
   }
   return (
     obstacle.netIsAssignable === true &&
@@ -137,6 +157,10 @@ export const getTraceClearanceViolations = (
   respectObstacleRotation = true,
 ): TraceClearanceViolation[] => {
   const contexts = getTraceContexts(prepared, solution);
+  const connectionNameResolver = new ConnectionNameResolver(
+    prepared.input,
+    solution.traces,
+  );
   const segmentsByTrace = contexts.map((context) => getSegments(context.trace));
   const violations: TraceClearanceViolation[] = [];
 
@@ -149,7 +173,14 @@ export const getTraceClearanceViolations = (
         if (
           obstacle.isCopperPour ||
           !obstacle.layers.includes(segment.start.layer) ||
-          obstacleAllowsSegment(prepared, context, obstacleIndex, segment)
+          obstacleAllowsSegment(
+            prepared,
+            context,
+            obstacleIndex,
+            segment,
+            connectionNameResolver,
+            true,
+          )
         ) {
           continue;
         }
@@ -224,6 +255,10 @@ const createSegmentClearanceChecker = (
   respectObstacleRotation = true,
 ) => {
   const contexts = getTraceContexts(prepared, solution);
+  const connectionNameResolver = new ConnectionNameResolver(
+    prepared.input,
+    solution.traces,
+  );
   const context = contexts[traceIndex]!;
   const blockingTraceSegments = contexts.flatMap((other, otherIndex) =>
     otherIndex === traceIndex || other.demand.netId === context.demand.netId
@@ -239,7 +274,13 @@ const createSegmentClearanceChecker = (
       if (
         obstacle.isCopperPour ||
         !obstacle.layers.includes(segment.start.layer) ||
-        obstacleAllowsSegment(prepared, context, obstacleIndex, segment)
+        obstacleAllowsSegment(
+          prepared,
+          context,
+          obstacleIndex,
+          segment,
+          connectionNameResolver,
+        )
       ) {
         continue;
       }
@@ -477,6 +518,10 @@ const repairRotatedObstacleClearance = (
   fallbackTraces: SimplifiedPcbTrace[] = [],
 ) => {
   const traces = cloneTraces(solution.traces);
+  const connectionNameResolver = new ConnectionNameResolver(
+    prepared.input,
+    solution.traces,
+  );
   const restoredTraceIndexes = new Set<number>();
   const maximumRepairs = Math.max(
     traces.reduce((count, trace) => count + getSegments(trace).length, 0),
@@ -517,7 +562,13 @@ const repairRotatedObstacleClearance = (
             Math.abs(obstacle.ccwRotationDegrees ?? 0) > EPSILON &&
             !obstacle.isCopperPour &&
             obstacle.layers.includes(start.layer) &&
-            !obstacleAllowsSegment(prepared, context, obstacleIndex, segment) &&
+            !obstacleAllowsSegment(
+              prepared,
+              context,
+              obstacleIndex,
+              segment,
+              connectionNameResolver,
+            ) &&
             segmentIntersectsRectInterior(
               start,
               end,

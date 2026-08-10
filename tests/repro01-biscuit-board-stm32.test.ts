@@ -1,7 +1,9 @@
 import { expect, test } from "bun:test";
 import type { SimpleRouteJson } from "@tscircuit/core";
+import { measureTraceWidths } from "@tscircuit/power-trace-expander";
 import {
   BiscuitBoardRoutingPipelineSolver,
+  ExpandBiscuitBoardTracesSolver,
   getTraceClearanceViolations,
   type PreparedBiscuitRoutingProblem,
 } from "../lib";
@@ -66,4 +68,28 @@ test("solves the exact BiscuitBoard STM32C071 real-project input", () => {
       expect(dx < 1e-7 || dy < 1e-7 || Math.abs(dx - dy) < 1e-7).toBe(true);
     }
   }
+
+  const targetInput = {
+    ...prepared!.input,
+    nominalTraceWidth: 0.3,
+    connections: prepared!.input.connections.map((connection) => ({
+      ...connection,
+      nominalTraceWidth: 0.3,
+    })),
+  };
+  const expansionSolver = new ExpandBiscuitBoardTracesSolver({
+    prepared: { ...prepared!, input: targetInput },
+    built: output!,
+  });
+  expansionSolver.solve();
+  const expanded = expansionSolver.getOutput()!;
+  const metrics = measureTraceWidths(targetInput, expanded.traces).get(0.3)!;
+  expect(expansionSolver.failed).toBe(false);
+  expect(metrics.nominalCoverage).toBeGreaterThan(0.8);
+  expect(metrics.normalizedWidthDeficit).toBeLessThan(0.1);
+  expect(
+    expanded.traces.flatMap((trace) =>
+      trace.route.filter((point) => point.route_type === "via"),
+    ),
+  ).toEqual([]);
 }, 30_000);

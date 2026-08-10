@@ -36,10 +36,15 @@ The exported `BiscuitBoardAutorouter` also implements tscircuit's
    negotiated rip-and-replace, and history costs.
 3. `BuildBiscuitBoardTracesSolver` removes redundant collinear vertices,
    creates tscircuit traces, and validates the fixed-via invariant again.
-4. `PostProcessBiscuitBoardTracesSolver` enforces 0.2 mm copper clearance and
+4. `PostProcessBiscuitBoardTracesSolver` enforces the configured copper clearance and
    greedily replaces whole stair-step runs with clearance-safe Manhattan/45°
    shortcuts. Its visualization overlays the original routes, obstacle/pad
    geometry, clearance envelopes, prefabricated vias, and simplified traces.
+5. `ExpandBiscuitBoardTracesSolver` uses
+   `@tscircuit/power-trace-expander` to widen the cleaned routes toward each
+   connection's `nominalTraceWidth`. It may shove narrower traces or detour
+   around obstacles, but disables new vias, revalidates clearance and the
+   fixed-via invariant, and removes redundant collinear probe points.
 
 This split is intentional: graph generation is independently visualizable and
 testable because it is the highest-risk part of the solver. See

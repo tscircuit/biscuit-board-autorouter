@@ -72,3 +72,18 @@ clear candidate is committed while the remaining routed traces are treated as
 immutable copper. Every candidate segment is checked independently against the
 same clearance model, and the complete output is validated again before it is
 returned.
+
+## Nominal-width expansion
+
+The final expansion stage deliberately separates routability from preferred
+copper width. Graph generation and rip-and-replace use each connection's
+physical `width` (falling back to `minTraceWidth`), while
+`nominalTraceWidth` remains a post-route target. The power-trace expander may
+widen clear segments in place, move lower-priority traces, or find a local
+obstacle-aware detour. New vias are disabled because arbitrary layer changes
+would violate the biscuit-board fabrication model.
+
+The expanded result is checked with the expander's exact capsule/polygon
+clearance model and then passed through the independent prefabricated-via
+validator. Collinear sampling points are removed only when doing so preserves
+both geometry and Circuit JSON's first-route-point segment-width semantics.
