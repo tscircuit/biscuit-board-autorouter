@@ -1,6 +1,7 @@
 import type { SimpleRouteJson, SimplifiedPcbTrace } from "@tscircuit/core";
 import { BaseSolver } from "@tscircuit/solver-utils";
 import type { GraphicsObject } from "graphics-debug";
+import { BuildBiscuitBoardTracesSolver } from "./build-biscuit-board-traces-solver";
 import {
   netColor,
   obstacleBounds,
@@ -8,6 +9,7 @@ import {
   segmentDistance,
   segmentIntersectsRectInterior,
 } from "./geometry";
+import { RipUpRubberBandSolver } from "./rip-up-rubber-band-solver";
 import type {
   BiscuitBoardRoutingSolution,
   Point,
@@ -49,6 +51,7 @@ export interface TraceClearanceViolation {
   traceId: string;
   otherId: string;
   message: string;
+  obstacleIndex?: number;
 }
 
 const EPSILON = 1e-7;
@@ -161,6 +164,7 @@ export const getTraceClearanceViolations = (
           violations.push({
             kind: "obstacle",
             traceId: context.trace.pcb_trace_id,
+            obstacleIndex,
             otherId:
               obstacle.obstacleId ??
               obstacle.componentId ??
@@ -455,6 +459,17 @@ const wirePathLength = (path: WirePoint[]) =>
       0,
     );
 
+class RotatedObstacleRepairError extends Error {
+  constructor(
+    readonly routeId: string,
+    readonly obstacleIndex: number,
+  ) {
+    super(
+      `Could not detour trace "${routeId}" around rotated obstacle ${obstacleIndex}`,
+    );
+  }
+}
+
 const repairRotatedObstacleClearance = (
   prepared: PreparedBiscuitRoutingProblem,
   solution: BiscuitBoardRoutingSolution,
@@ -511,7 +526,7 @@ const repairRotatedObstacleClearance = (
         );
         if (!blockingEntry) continue;
 
-        const [, obstacle] = blockingEntry;
+        const [blockingObstacleIndex, obstacle] = blockingEntry;
         const bounds = obstacleBounds(obstacle, start.width / 2 + clearance);
         const nudge = 1e-4;
         const detourStep = Math.max(clearance, start.width / 2, 0.05);
@@ -670,8 +685,9 @@ const repairRotatedObstacleClearance = (
             repaired = true;
             break;
           }
-          throw new Error(
-            `Could not detour trace "${context.route.routeId}" around rotated obstacle`,
+          throw new RotatedObstacleRepairError(
+            context.route.routeId,
+            blockingObstacleIndex,
           );
         }
         route.splice(
@@ -922,7 +938,7 @@ const repairTraceClearance = (
   );
 };
 
-export const postProcessBiscuitBoardTraces = (
+const postProcessBiscuitBoardTracesOnce = (
   prepared: PreparedBiscuitRoutingProblem,
   solution: BiscuitBoardRoutingSolution,
 ): BiscuitBoardRoutingSolution => {
@@ -1033,6 +1049,57 @@ export const postProcessBiscuitBoardTraces = (
     throw new Error(`Trace cleanup failed: ${finalViolations[0]!.message}`);
   }
   return output;
+};
+
+export const postProcessBiscuitBoardTraces = (
+  prepared: PreparedBiscuitRoutingProblem,
+  solution: BiscuitBoardRoutingSolution,
+): BiscuitBoardRoutingSolution => {
+  let repairPrepared = prepared;
+  let repairSolution = solution;
+
+  for (let repairAttempt = 0; repairAttempt < 8; repairAttempt++) {
+    try {
+      return postProcessBiscuitBoardTracesOnce(repairPrepared, repairSolution);
+    } catch (error) {
+      if (!(error instanceof RotatedObstacleRepairError)) throw error;
+      if (
+        repairPrepared.exactRotatedObstacleIndexes.includes(error.obstacleIndex)
+      ) {
+        throw error;
+      }
+
+      repairPrepared = {
+        ...repairPrepared,
+        exactRotatedObstacleIndexes: [
+          ...repairPrepared.exactRotatedObstacleIndexes,
+          error.obstacleIndex,
+        ],
+      };
+      const rerouter = new RipUpRubberBandSolver(repairPrepared);
+      rerouter.seedCommittedRoutes(repairSolution.routes, [error.routeId]);
+      rerouter.solve();
+      if (rerouter.failed) {
+        throw new Error(
+          `Could not reroute trace "${error.routeId}" around rotated obstacle ${error.obstacleIndex}: ${rerouter.error ?? "routing failed"}`,
+        );
+      }
+      const builder = new BuildBiscuitBoardTracesSolver({
+        prepared: repairPrepared,
+        routed: rerouter.getOutput(),
+      });
+      builder.solve();
+      const built = builder.getOutput();
+      if (!built) {
+        throw new Error(
+          `Could not rebuild traces after rerouting "${error.routeId}"`,
+        );
+      }
+      repairSolution = built;
+    }
+  }
+
+  throw new Error("Rotated-obstacle graph repair exceeded its attempt limit");
 };
 
 const visualizeTraces = (

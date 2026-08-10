@@ -1,6 +1,7 @@
 import { BaseSolver } from "@tscircuit/solver-utils";
 import type { GraphicsObject } from "graphics-debug";
 import {
+  getTerminalEscapeMinimumRun,
   obstacleBounds,
   pointDistance,
   pointStrictlyInsideRect,
@@ -22,6 +23,9 @@ import type {
   RoutingNode,
 } from "./types";
 import type { SimpleRouteJson } from "@tscircuit/core";
+import { BuildBiscuitBoardTracesSolver } from "./build-biscuit-board-traces-solver";
+import { getTraceClearanceViolations } from "./post-process-biscuit-board-traces-solver";
+import { RipUpRubberBandSolver } from "./rip-up-rubber-band-solver";
 
 const ROUNDING_SCALE = 1e6;
 const roundCoordinate = (value: number) =>
@@ -35,7 +39,6 @@ const DEFAULT_OPTIONS: NormalizedBiscuitBoardAutorouterOptions = {
   gridPitch: 1.5,
   gridClearance: 0.2,
   respectObstacleRotationInGraph: false,
-  rotatedObstacleIndexesInGraph: [],
   viaTransitionCost: 20,
   ripCost: 10,
   crossingCost: 0.25,
@@ -45,6 +48,10 @@ const DEFAULT_OPTIONS: NormalizedBiscuitBoardAutorouterOptions = {
   maxTotalRips: 10_000,
   maxSearchStates: 500_000,
   expansionsPerStep: 300,
+};
+
+type HypergraphGenerationOptions = NormalizedBiscuitBoardAutorouterOptions & {
+  exactRotatedObstacleIndexes: ReadonlySet<number>;
 };
 
 const normalizeOptions = (
@@ -148,9 +155,9 @@ const graphUsesRotatedObstacleBounds = (
   obstacle: SimpleRouteJson["obstacles"][number],
   obstacleIndex: number,
   margin: number,
-  options: NormalizedBiscuitBoardAutorouterOptions,
+  options: HypergraphGenerationOptions,
 ) =>
-  options.rotatedObstacleIndexesInGraph.includes(obstacleIndex) ||
+  options.exactRotatedObstacleIndexes.has(obstacleIndex) ||
   shouldRespectObstacleRotationInGraph(
     input,
     obstacle,
@@ -192,7 +199,7 @@ const nodeIsBlocked = (
   point: Point,
   margin: number,
   special: ReturnType<typeof getSpecialNodeMetadata>,
-  options: NormalizedBiscuitBoardAutorouterOptions,
+  options: HypergraphGenerationOptions,
 ) =>
   input.obstacles.some((obstacle, obstacleIndex) => {
     if (obstacle.isCopperPour || !obstacleIsOnLayer(obstacle, layer))
@@ -233,7 +240,7 @@ const getBlockingObstacleIndexes = (
   start: RoutingNode,
   end: RoutingNode,
   margin: number,
-  options: NormalizedBiscuitBoardAutorouterOptions,
+  options: HypergraphGenerationOptions,
 ) =>
   input.obstacles.flatMap((obstacle, obstacleIndex) => {
     if (obstacle.isCopperPour || !obstacleIsOnLayer(obstacle, layer)) return [];
@@ -490,9 +497,10 @@ const addConflictPairs = (
   }
 };
 
-export const generateBiscuitBoardHypergraph = (
+const buildBiscuitBoardHypergraph = (
   input: SimpleRouteJson,
   rawOptions: BiscuitBoardAutorouterOptions = {},
+  exactRotatedObstacleIndexes: ReadonlySet<number> = new Set(),
 ): PreparedBiscuitRoutingProblem => {
   if (input.layerCount < 1) throw new Error("layerCount must be at least one");
   if (
@@ -501,7 +509,11 @@ export const generateBiscuitBoardHypergraph = (
   ) {
     throw new Error("routing bounds must have positive width and height");
   }
-  const options = normalizeOptions(rawOptions);
+  const normalizedOptions = normalizeOptions(rawOptions);
+  const options: HypergraphGenerationOptions = {
+    ...normalizedOptions,
+    exactRotatedObstacleIndexes,
+  };
   const layers = getLayers(input);
   const prefabricatedVias = getPrefabricatedVias(input);
   const maximumTraceWidth = Math.max(
@@ -663,7 +675,12 @@ export const generateBiscuitBoardHypergraph = (
             const deltaY = other.y - point.y;
             const guideX = roundCoordinate(point.x + 5);
             if (other.x - point.x > 20 && Math.abs(deltaY) < 2) {
-              const guideStartX = roundCoordinate(point.x + 1.025);
+              const guideStartX = roundCoordinate(
+                point.x +
+                  getTerminalEscapeMinimumRun(obstacle, effectiveClearance) +
+                  maximumTraceWidth +
+                  effectiveClearance,
+              );
               const guideY = roundCoordinate(
                 point.y + Math.sign(deltaY) * 1.25,
               );
@@ -675,7 +692,10 @@ export const generateBiscuitBoardHypergraph = (
                 { x: guideX, y: other.y },
               ]);
             } else if (deltaY > 2 && other.x - point.x < 20) {
-              const guideStartX = roundCoordinate(point.x + 0.725);
+              const guideStartX = roundCoordinate(
+                point.x +
+                  getTerminalEscapeMinimumRun(obstacle, effectiveClearance),
+              );
               const guideY = roundCoordinate(point.y + 1.4);
               addRestrictedGuide([
                 point,
@@ -977,7 +997,8 @@ export const generateBiscuitBoardHypergraph = (
   const demands = buildDemands(input, nodeIndexByKey);
   return {
     input,
-    options,
+    options: normalizedOptions,
+    exactRotatedObstacleIndexes: [...exactRotatedObstacleIndexes],
     layers,
     nodes,
     edges,
@@ -990,6 +1011,12 @@ export const generateBiscuitBoardHypergraph = (
     ),
   };
 };
+
+export const generateBiscuitBoardHypergraph = (
+  input: SimpleRouteJson,
+  rawOptions: BiscuitBoardAutorouterOptions = {},
+): PreparedBiscuitRoutingProblem =>
+  buildBiscuitBoardHypergraph(input, rawOptions);
 
 export class GenerateBiscuitBoardHypergraphSolver extends BaseSolver {
   private output?: PreparedBiscuitRoutingProblem;
@@ -1012,11 +1039,68 @@ export class GenerateBiscuitBoardHypergraphSolver extends BaseSolver {
   }
 
   override _step() {
-    this.output = generateBiscuitBoardHypergraph(this.input, this.options);
+    const nominalProblem = generateBiscuitBoardHypergraph(
+      this.input,
+      this.options,
+    );
+    const rotatedObstacleIndexes = this.input.obstacles.flatMap(
+      (obstacle, obstacleIndex) =>
+        Math.abs(obstacle.ccwRotationDegrees ?? 0) > 1e-7 &&
+        !obstacle.isCopperPour
+          ? [obstacleIndex]
+          : [],
+    );
+    let detectedRotatedObstacleIndexes: number[] = [];
+    if (
+      rotatedObstacleIndexes.length > 0 &&
+      !nominalProblem.options.respectObstacleRotationInGraph
+    ) {
+      const probeProblem: PreparedBiscuitRoutingProblem = {
+        ...nominalProblem,
+        options: {
+          ...nominalProblem.options,
+          maxRipsPerRoute: Math.min(nominalProblem.options.maxRipsPerRoute, 50),
+          maxTotalRips: Math.min(nominalProblem.options.maxTotalRips, 200),
+        },
+      };
+      const probe = new RipUpRubberBandSolver(probeProblem);
+      probe.solve();
+      const builder = new BuildBiscuitBoardTracesSolver({
+        prepared: probeProblem,
+        routed: probe.getOutput(),
+      });
+      builder.solve();
+      const built = builder.getOutput();
+      if (built) {
+        const rotatedObstacleIndexSet = new Set(rotatedObstacleIndexes);
+        detectedRotatedObstacleIndexes = [
+          ...new Set(
+            getTraceClearanceViolations(probeProblem, built).flatMap(
+              (violation) =>
+                violation.kind === "obstacle" &&
+                violation.obstacleIndex !== undefined &&
+                rotatedObstacleIndexSet.has(violation.obstacleIndex)
+                  ? [violation.obstacleIndex]
+                  : [],
+            ),
+          ),
+        ];
+      }
+    }
+    this.output =
+      detectedRotatedObstacleIndexes.length > 0
+        ? buildBiscuitBoardHypergraph(
+            this.input,
+            this.options,
+            new Set(detectedRotatedObstacleIndexes),
+          )
+        : nominalProblem;
     this.stats = {
       graphNodeCount: this.output.nodes.length,
       graphEdgeCount: this.output.edges.length,
       prefabricatedViaCount: this.output.prefabricatedVias.length,
+      automaticallyReservedRotatedObstacleCount:
+        detectedRotatedObstacleIndexes.length,
     };
     this.progress = 1;
     this.solved = true;

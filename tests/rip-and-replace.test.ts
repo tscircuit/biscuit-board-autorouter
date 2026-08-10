@@ -99,6 +99,17 @@ test("rips a chokepoint route and requeues it onto a clear corridor", () => {
   expect(solver.committedRoutes.get("a-flexible")!.nodePath).toEqual([
     0, 3, 4, 2,
   ]);
+
+  const repairSolver = new RipUpRubberBandSolver(prepared);
+  repairSolver.seedCommittedRoutes(solver.getOutput().routes, ["b-chokepoint"]);
+  repairSolver.solve();
+
+  expect(repairSolver.failed).toBe(false);
+  expect(repairSolver.solved).toBe(true);
+  expect(repairSolver.getOutput().routes).toHaveLength(2);
+  expect(repairSolver.committedRoutes.get("b-chokepoint")!.nodePath).toEqual([
+    5, 1, 6,
+  ]);
 });
 
 test("indexes occupied conflict edges without requiring a shared node", () => {

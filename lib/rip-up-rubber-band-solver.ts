@@ -1,6 +1,7 @@
 import { BaseSolver } from "@tscircuit/solver-utils";
 import type { GraphicsObject } from "graphics-debug";
 import {
+  getTerminalEscapeMinimumRun,
   obstacleBounds,
   pointDistance,
   segmentDistance,
@@ -335,6 +336,74 @@ export class RipUpRubberBandSolver extends BaseSolver {
 
   get negotiationConflictComponents() {
     return this.lastConflictComponents.map((component) => [...component]);
+  }
+
+  /**
+   * Reuses a completed routing as the starting point for a localized
+   * rip-and-replace repair. The node and edge indexes must belong to this
+   * solver's prepared graph.
+   */
+  seedCommittedRoutes(
+    routes: readonly RoutedConnection[],
+    routeIdsToReroute: readonly string[],
+  ) {
+    if (this.committed.size > 0 || this.activeSearch) {
+      throw new Error("Cannot seed a routing solver after routing has started");
+    }
+    this.pending.splice(0);
+    for (const route of routes) this.installSeededRoute(route);
+    for (const routeId of routeIdsToReroute) {
+      this.uncommitRoute(routeId);
+      this.queueDemand(routeId);
+    }
+    this.totalRipCount = 0;
+    this.ripCountByRoute.clear();
+    this.updateStats();
+  }
+
+  private installSeededRoute(route: RoutedConnection) {
+    const dependencies = new Set<string>();
+    for (const endpointNode of [route.nodePath[0], route.nodePath.at(-1)]) {
+      if (endpointNode === undefined) continue;
+      for (const ownerRouteId of this.nodeOwners.get(endpointNode) ?? []) {
+        if (this.committed.get(ownerRouteId)?.netId === route.netId) {
+          dependencies.add(ownerRouteId);
+        }
+      }
+    }
+    this.committed.set(route.routeId, route);
+    this.routeDependenciesByRoute.set(route.routeId, dependencies);
+    const ownedNodeCounts =
+      this.ownedNodeCountByNet.get(route.netId) ?? new Map<number, number>();
+    this.ownedNodeCountByNet.set(route.netId, ownedNodeCounts);
+    for (const nodeIndex of route.nodePath) {
+      const owners = this.nodeOwners.get(nodeIndex) ?? new Set<string>();
+      owners.add(route.routeId);
+      this.nodeOwners.set(nodeIndex, owners);
+      ownedNodeCounts.set(nodeIndex, (ownedNodeCounts.get(nodeIndex) ?? 0) + 1);
+    }
+    for (const edgeId of route.edgePath) {
+      const edge = this.prepared.edges[edgeId]!;
+      if (edge.kind !== "trace") {
+        this.committedFixedViaTransitionCount++;
+        continue;
+      }
+      const owners = this.edgeOwners.get(edgeId) ?? new Set<string>();
+      owners.add(route.routeId);
+      this.edgeOwners.set(edgeId, owners);
+      const conflictDistances = this.getConflictDistances(edge);
+      for (let index = 0; index < edge.conflictEdgeIds.length; index++) {
+        const conflictEdgeId = edge.conflictEdgeIds[index]!;
+        const occupancy =
+          this.occupancyByEdge.get(conflictEdgeId) ??
+          new Map<string, number[]>();
+        this.occupancyByEdge.set(conflictEdgeId, occupancy);
+        const distances = occupancy.get(route.routeId) ?? [];
+        distances.push(conflictDistances[index]!);
+        occupancy.set(route.routeId, distances);
+      }
+    }
+    this.ownershipVersion++;
   }
 
   private groupDemandsByNet(demands: RouteDemand[]) {
@@ -914,10 +983,10 @@ export class RipUpRubberBandSolver extends BaseSolver {
       const axis = pad.width > pad.height ? "x" : "y";
       const destinationDelta = other[axis] - terminal[axis];
       if (Math.abs(destinationDelta) <= 1e-7) continue;
-      const minimumRun =
-        Math.max(pad.width, pad.height) / 2 +
-        this.prepared.options.gridClearance +
-        0.2;
+      const minimumRun = getTerminalEscapeMinimumRun(
+        pad,
+        this.effectiveClearance,
+      );
       constraints.push({
         terminalNode,
         axis,
@@ -1303,7 +1372,16 @@ export class RipUpRubberBandSolver extends BaseSolver {
     }
     const from = this.prepared.nodes[edge.fromNode]!;
     const to = this.prepared.nodes[edge.toNode]!;
-    for (const obstacleIndex of edge.blockingObstacleIndexes) {
+    const obstacleIndexes =
+      this.prepared.exactRotatedObstacleIndexes.length === 0
+        ? edge.blockingObstacleIndexes
+        : [
+            ...new Set([
+              ...edge.blockingObstacleIndexes,
+              ...this.prepared.exactRotatedObstacleIndexes,
+            ]),
+          ];
+    for (const obstacleIndex of obstacleIndexes) {
       const obstacle = this.prepared.input.obstacles[obstacleIndex]!;
       const clearance = Math.max(
         this.prepared.options.gridClearance,
@@ -1320,12 +1398,10 @@ export class RipUpRubberBandSolver extends BaseSolver {
               this.prepared.input,
               obstacle,
               demand.width / 2 + clearance,
-              this.prepared.options.rotatedObstacleIndexesInGraph.includes(
+              this.prepared.exactRotatedObstacleIndexes.includes(
                 obstacleIndex,
               ) || this.prepared.options.respectObstacleRotationInGraph,
-              this.prepared.options.rotatedObstacleIndexesInGraph.includes(
-                obstacleIndex,
-              )
+              this.prepared.exactRotatedObstacleIndexes.includes(obstacleIndex)
                 ? Number.POSITIVE_INFINITY
                 : this.prepared.options.gridPitch,
             ),
