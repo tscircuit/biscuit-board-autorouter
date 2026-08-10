@@ -520,32 +520,54 @@ const repairRotatedObstacleClearance = (
           (_, index) => nudge + index * detourStep,
         );
         const candidatePointPaths: Point[][] = detourOffsets.flatMap(
-          (offset) => [
-            [
-              start,
-              { x: bounds.minX - offset, y: start.y },
-              { x: bounds.minX - offset, y: end.y },
-              end,
-            ],
-            [
-              start,
-              { x: bounds.maxX + offset, y: start.y },
-              { x: bounds.maxX + offset, y: end.y },
-              end,
-            ],
-            [
-              start,
-              { x: start.x, y: bounds.minY - offset },
-              { x: end.x, y: bounds.minY - offset },
-              end,
-            ],
-            [
-              start,
-              { x: start.x, y: bounds.maxY + offset },
-              { x: end.x, y: bounds.maxY + offset },
-              end,
-            ],
-          ],
+          (offset) => {
+            const left = bounds.minX - offset;
+            const right = bounds.maxX + offset;
+            const bottom = bounds.minY - offset;
+            const top = bounds.maxY + offset;
+            const firstX = start.x <= end.x ? left : right;
+            const secondX = start.x <= end.x ? right : left;
+            const firstY = start.y <= end.y ? bottom : top;
+            const secondY = start.y <= end.y ? top : bottom;
+            return [
+              [start, { x: left, y: start.y }, { x: left, y: end.y }, end],
+              [start, { x: right, y: start.y }, { x: right, y: end.y }, end],
+              [start, { x: start.x, y: bottom }, { x: end.x, y: bottom }, end],
+              [start, { x: start.x, y: top }, { x: end.x, y: top }, end],
+              [
+                start,
+                { x: firstX, y: start.y },
+                { x: firstX, y: bottom },
+                { x: secondX, y: bottom },
+                { x: secondX, y: end.y },
+                end,
+              ],
+              [
+                start,
+                { x: firstX, y: start.y },
+                { x: firstX, y: top },
+                { x: secondX, y: top },
+                { x: secondX, y: end.y },
+                end,
+              ],
+              [
+                start,
+                { x: start.x, y: firstY },
+                { x: left, y: firstY },
+                { x: left, y: secondY },
+                { x: end.x, y: secondY },
+                end,
+              ],
+              [
+                start,
+                { x: start.x, y: firstY },
+                { x: right, y: firstY },
+                { x: right, y: secondY },
+                { x: end.x, y: secondY },
+                end,
+              ],
+            ];
+          },
         );
         const boardMargin =
           (prepared.input.minBoardEdgeClearance ?? 0) + start.width / 2;
