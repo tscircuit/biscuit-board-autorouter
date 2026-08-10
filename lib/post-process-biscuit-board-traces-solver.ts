@@ -509,33 +509,53 @@ const repairRotatedObstacleClearance = (
         const [, obstacle] = blockingEntry;
         const bounds = obstacleBounds(obstacle, start.width / 2 + clearance);
         const nudge = 1e-4;
-        const candidatePointPaths: Point[][] = [
-          [
-            start,
-            { x: bounds.minX - nudge, y: start.y },
-            { x: bounds.minX - nudge, y: end.y },
-            end,
+        const detourStep = Math.max(clearance, start.width / 2, 0.05);
+        const detourOffsets = Array.from(
+          { length: 21 },
+          (_, index) => nudge + index * detourStep,
+        );
+        const candidatePointPaths: Point[][] = detourOffsets.flatMap(
+          (offset) => [
+            [
+              start,
+              { x: bounds.minX - offset, y: start.y },
+              { x: bounds.minX - offset, y: end.y },
+              end,
+            ],
+            [
+              start,
+              { x: bounds.maxX + offset, y: start.y },
+              { x: bounds.maxX + offset, y: end.y },
+              end,
+            ],
+            [
+              start,
+              { x: start.x, y: bounds.minY - offset },
+              { x: end.x, y: bounds.minY - offset },
+              end,
+            ],
+            [
+              start,
+              { x: start.x, y: bounds.maxY + offset },
+              { x: end.x, y: bounds.maxY + offset },
+              end,
+            ],
           ],
-          [
-            start,
-            { x: bounds.maxX + nudge, y: start.y },
-            { x: bounds.maxX + nudge, y: end.y },
-            end,
-          ],
-          [
-            start,
-            { x: start.x, y: bounds.minY - nudge },
-            { x: end.x, y: bounds.minY - nudge },
-            end,
-          ],
-          [
-            start,
-            { x: start.x, y: bounds.maxY + nudge },
-            { x: end.x, y: bounds.maxY + nudge },
-            end,
-          ],
-        ];
+        );
+        const boardMargin =
+          (prepared.input.minBoardEdgeClearance ?? 0) + start.width / 2;
         const candidates = candidatePointPaths
+          .filter((path) =>
+            path
+              .slice(1, -1)
+              .every(
+                (point) =>
+                  point.x >= prepared.input.bounds.minX + boardMargin &&
+                  point.x <= prepared.input.bounds.maxX - boardMargin &&
+                  point.y >= prepared.input.bounds.minY + boardMargin &&
+                  point.y <= prepared.input.bounds.maxY - boardMargin,
+              ),
+          )
           .map((path) => collapseCollinearWirePoints(toWirePath(path, start)))
           .filter((path) =>
             path
