@@ -459,11 +459,16 @@ const repairRotatedObstacleClearance = (
   prepared: PreparedBiscuitRoutingProblem,
   solution: BiscuitBoardRoutingSolution,
   clearance: number,
+  fallbackTraces: SimplifiedPcbTrace[] = [],
 ) => {
   const traces = cloneTraces(solution.traces);
-  const maximumRepairs = traces.reduce(
-    (count, trace) => count + getSegments(trace).length,
-    0,
+  const restoredTraceIndexes = new Set<number>();
+  const maximumRepairs = Math.max(
+    traces.reduce((count, trace) => count + getSegments(trace).length, 0),
+    fallbackTraces.reduce(
+      (count, trace) => count + getSegments(trace).length,
+      0,
+    ),
   );
 
   for (let repairCount = 0; repairCount < maximumRepairs; repairCount++) {
@@ -571,6 +576,16 @@ const repairRotatedObstacleClearance = (
           );
         const detour = candidates[0];
         if (!detour) {
+          const fallbackTrace = fallbackTraces[traceIndex];
+          if (fallbackTrace && !restoredTraceIndexes.has(traceIndex)) {
+            traces[traceIndex] = {
+              ...fallbackTrace,
+              route: fallbackTrace.route.map((point) => ({ ...point })),
+            };
+            restoredTraceIndexes.add(traceIndex);
+            repaired = true;
+            break;
+          }
           throw new Error(
             `Could not detour trace "${context.route.routeId}" around rotated obstacle`,
           );
@@ -899,6 +914,7 @@ export const postProcessBiscuitBoardTraces = (
     prepared,
     { ...solution, traces },
     clearance,
+    repairedSolution.traces,
   );
   const postSimplificationSegmentCount = traces.reduce(
     (count, trace) => count + getSegments(trace).length,
