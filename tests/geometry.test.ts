@@ -66,9 +66,14 @@ test("graph generation can reserve rotated obstacle envelopes", () => {
     gridClearance: 0.1,
     respectObstacleRotationInGraph: true,
   });
-  const isDifferingEnvelopePoint = (node: { x: number; y: number }) =>
-    Math.abs(node.x - 4.225) < 1e-6 && Math.abs(node.y - 4.665) < 1e-6;
+  const blockedEdgeCount = (graph: typeof withRotation) =>
+    graph.edges.filter(
+      (edge) =>
+        edge.kind === "trace" && edge.blockingObstacleIndexes.includes(0),
+    ).length;
 
-  expect(withoutRotation.nodes.some(isDifferingEnvelopePoint)).toBe(true);
-  expect(withRotation.nodes.some(isDifferingEnvelopePoint)).toBe(false);
+  expect(withRotation.nodes).toHaveLength(withoutRotation.nodes.length);
+  expect(blockedEdgeCount(withRotation)).toBeGreaterThan(
+    blockedEdgeCount(withoutRotation),
+  );
 });

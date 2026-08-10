@@ -525,11 +525,7 @@ export const generateBiscuitBoardHypergraph = (
   const guidedTerminalKeys = new Set<string>();
   for (const obstacle of input.obstacles) {
     if (obstacle.isCopperPour || obstacle.netIsAssignable) continue;
-    const bounds = obstacleBounds(
-      obstacle,
-      maximumTraceMargin,
-      options.respectObstacleRotationInGraph,
-    );
+    const bounds = obstacleBounds(obstacle, maximumTraceMargin, false);
     verticalSweepCoordinates.push(bounds.minX, bounds.maxX);
     horizontalSweepCoordinates.push(bounds.minY, bounds.maxY);
     specialPoints.push(
@@ -576,11 +572,7 @@ export const generateBiscuitBoardHypergraph = (
         if (obstacle.isCopperPour || !matchesConnection) {
           continue;
         }
-        const bounds = obstacleBounds(
-          obstacle,
-          maximumTraceMargin,
-          options.respectObstacleRotationInGraph,
-        );
+        const bounds = obstacleBounds(obstacle, maximumTraceMargin, false);
         const escapePoints = [
           { x: bounds.minX, y: point.y },
           { x: bounds.maxX, y: point.y },
@@ -749,7 +741,7 @@ export const generateBiscuitBoardHypergraph = (
           point,
           maximumTraceMargin,
           special,
-          options.respectObstacleRotationInGraph,
+          false,
         ) &&
         special.terminalConnectionNames.length === 0 &&
         !special.prefabVia
