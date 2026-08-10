@@ -392,11 +392,7 @@ const buildDemands = (
         targetNode: target.node!,
         sourcePointId: bestConnected.point.pointId,
         targetPointId: target.point.pointId,
-        width:
-          connection.nominalTraceWidth ??
-          connection.width ??
-          input.nominalTraceWidth ??
-          input.minTraceWidth,
+        width: connection.width ?? input.minTraceWidth,
       });
       connected.push(target);
     }
@@ -518,10 +514,8 @@ const buildBiscuitBoardHypergraph = (
   const prefabricatedVias = getPrefabricatedVias(input);
   const maximumTraceWidth = Math.max(
     input.minTraceWidth,
-    input.nominalTraceWidth ?? 0,
     ...input.connections.map(
-      (connection) =>
-        connection.nominalTraceWidth ?? connection.width ?? input.minTraceWidth,
+      (connection) => connection.width ?? input.minTraceWidth,
     ),
   );
   const effectiveClearance = Math.max(

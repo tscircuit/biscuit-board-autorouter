@@ -283,7 +283,6 @@ export const visualizePreparedProblem = (
   const rects: NonNullable<GraphicsObject["rects"]> = [];
   const maximumTraceWidth = Math.max(
     prepared.input.minTraceWidth,
-    prepared.input.nominalTraceWidth ?? 0,
     ...prepared.demands.map((demand) => demand.width),
   );
   const margin =

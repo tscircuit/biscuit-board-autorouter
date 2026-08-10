@@ -6,6 +6,7 @@ import {
 } from "@tscircuit/solver-utils";
 import type { GraphicsObject } from "graphics-debug";
 import { BuildBiscuitBoardTracesSolver } from "./build-biscuit-board-traces-solver";
+import { ExpandBiscuitBoardTracesSolver } from "./expand-biscuit-board-traces-solver";
 import { GenerateBiscuitBoardHypergraphSolver } from "./generate-biscuit-board-hypergraph-solver";
 import { PostProcessBiscuitBoardTracesSolver } from "./post-process-biscuit-board-traces-solver";
 import { RipUpRubberBandSolver } from "./rip-up-rubber-band-solver";
@@ -69,6 +70,28 @@ export class BiscuitBoardRoutingPipelineSolver extends BasePipelineSolver<Simple
         return [{ prepared, built }];
       },
     ),
+    definePipelineStep(
+      "expand-traces",
+      ExpandBiscuitBoardTracesSolver,
+      (instance: BiscuitBoardRoutingPipelineSolver) => {
+        const prepared = instance.getStageOutput<PreparedBiscuitRoutingProblem>(
+          "generate-hypergraph",
+        );
+        const built = instance.getStageOutput<BiscuitBoardRoutingSolution>(
+          "post-process-traces",
+        );
+        if (!prepared || !built) {
+          throw new Error("Trace expansion inputs are unavailable");
+        }
+        return [
+          {
+            prepared,
+            built,
+            enabled: instance.options.expandTraces,
+          },
+        ];
+      },
+    ),
   ];
 
   constructor(
@@ -76,7 +99,9 @@ export class BiscuitBoardRoutingPipelineSolver extends BasePipelineSolver<Simple
     public readonly options: BiscuitBoardAutorouterOptions = {},
   ) {
     super(input);
-    this.MAX_ITERATIONS = 3_000_000;
+    // The expansion stage may consume most of its eight-million-iteration
+    // budget on dense boards, in addition to the graph and routing stages.
+    this.MAX_ITERATIONS = 10_000_000;
   }
 
   override getConstructorParams(): [
@@ -96,8 +121,7 @@ export class BiscuitBoardRoutingPipelineSolver extends BasePipelineSolver<Simple
 
   override getOutput(): BiscuitBoardRoutingSolution | null {
     return (
-      this.getStageOutput<BiscuitBoardRoutingSolution>("post-process-traces") ??
-      null
+      this.getStageOutput<BiscuitBoardRoutingSolution>("expand-traces") ?? null
     );
   }
 }

@@ -26,6 +26,7 @@ test("every pipeline stage exposes a meaningful visualization", () => {
     "route-with-rip-and-replace",
     "build-and-validate-traces",
     "post-process-traces",
+    "expand-traces",
   ] as const;
   for (const stageName of stageNames) {
     const stage = pipeline.getSolver(stageName);
