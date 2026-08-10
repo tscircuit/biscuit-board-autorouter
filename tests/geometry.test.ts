@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { SimpleRouteJson } from "@tscircuit/core";
-import { generateBiscuitBoardHypergraph } from "../lib";
+import { generateBiscuitBoardHypergraph, RipUpRubberBandSolver } from "../lib";
 import { obstacleBounds } from "../lib/geometry";
 
 test("obstacle bounds include rotation and clearance", () => {
@@ -76,36 +76,67 @@ test("graph generation can reserve rotated obstacle envelopes", () => {
   expect(hasRotatedEnvelopeSweepNode(withRotation)).toBe(true);
 });
 
-test("graph generation can reserve one selected rotated obstacle", () => {
+test("fine-pitch escape guides honor increased trace-to-pad clearance", () => {
   const input: SimpleRouteJson = {
-    bounds: { minX: 0, minY: 0, maxX: 10, maxY: 10 },
+    bounds: { minX: 0, minY: 0, maxX: 15, maxY: 15 },
     layerCount: 1,
     minTraceWidth: 0.2,
-    minTraceToPadEdgeClearance: 0.1,
-    connections: [],
+    minTraceToPadEdgeClearance: 0.2,
+    connections: [
+      {
+        name: "source_trace_1",
+        width: 0.2,
+        pointsToConnect: [
+          { x: 11, y: 7, layer: "top", pointId: "far-pad" },
+          { x: 8, y: 4, layer: "top", pointId: "fine-pitch-pad" },
+        ],
+      },
+    ],
     obstacles: [
       {
         type: "rect",
-        center: { x: 5, y: 5 },
-        width: 1.2,
-        height: 1.8,
-        ccwRotationDegrees: 270,
+        center: { x: 11, y: 7 },
+        width: 0.5,
+        height: 0.5,
         layers: ["top"],
-        connectedTo: [],
+        connectedTo: ["source_trace_1", "far-pad"],
+      },
+      {
+        type: "rect",
+        center: { x: 8, y: 4 },
+        width: 0.85,
+        height: 0.2,
+        layers: ["top"],
+        connectedTo: ["source_trace_1", "fine-pitch-pad"],
       },
     ],
   };
-
-  const graph = generateBiscuitBoardHypergraph(input, {
-    gridPitch: 0.765,
-    gridClearance: 0.1,
-    rotatedObstacleIndexesInGraph: [0],
+  const prepared = generateBiscuitBoardHypergraph(input, {
+    gridClearance: 0.2,
   });
+  const guideEdges = prepared.edges
+    .filter(
+      (
+        edge,
+      ): edge is Extract<(typeof prepared.edges)[number], { kind: "trace" }> =>
+        edge.kind === "trace" &&
+        edge.restrictedToConnectionName === "source_trace_1",
+    )
+    .sort(
+      (left, right) =>
+        (left.restrictedGuideOrder ?? 0) - (right.restrictedGuideOrder ?? 0),
+    );
 
+  expect(guideEdges).toHaveLength(2);
   expect(
-    graph.nodes.some(
-      (node) =>
-        Math.abs(node.x - 6.1) < 1e-6 && Math.abs(node.y - 4.69) < 1e-6,
+    Math.max(
+      prepared.nodes[guideEdges[1]!.fromNode]!.x,
+      prepared.nodes[guideEdges[1]!.toNode]!.x,
     ),
-  ).toBe(true);
+  ).toBeCloseTo(8.825);
+
+  const solver = new RipUpRubberBandSolver(prepared);
+  solver.solve();
+  expect(solver.failed).toBe(false);
+  expect(solver.solved).toBe(true);
 });

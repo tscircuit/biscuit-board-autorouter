@@ -16,6 +16,11 @@ export const pointsEqual = (a: Point, b: Point, epsilon = EPSILON) =>
 export const pointDistance = (a: Point, b: Point) =>
   Math.hypot(a.x - b.x, a.y - b.y);
 
+export const getTerminalEscapeMinimumRun = (
+  pad: Pick<SimpleRouteJson["obstacles"][number], "width" | "height">,
+  clearance: number,
+) => Math.max(pad.width, pad.height) / 2 + clearance + 0.2;
+
 export const pointStrictlyInsideRect = (point: Point, rect: RectBounds) =>
   point.x > rect.minX + EPSILON &&
   point.x < rect.maxX - EPSILON &&
