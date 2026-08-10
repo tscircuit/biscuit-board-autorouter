@@ -7,6 +7,7 @@ import {
   pointsEqual,
   segmentDistance,
   segmentIntersectsRectInterior,
+  shouldRespectObstacleRotationInGraph,
   visualizePreparedProblem,
   visualizeSimpleRouteJsonInput,
 } from "./geometry";
@@ -174,7 +175,7 @@ const nodeIsBlocked = (
   point: Point,
   margin: number,
   special: ReturnType<typeof getSpecialNodeMetadata>,
-  respectObstacleRotation: boolean,
+  options: NormalizedBiscuitBoardAutorouterOptions,
 ) =>
   input.obstacles.some((obstacle, obstacleIndex) => {
     if (obstacle.isCopperPour || !obstacleIsOnLayer(obstacle, layer))
@@ -195,7 +196,17 @@ const nodeIsBlocked = (
     // not force an unrelated whole-board rip-up negotiation.
     return pointStrictlyInsideRect(
       point,
-      obstacleBounds(obstacle, margin, respectObstacleRotation),
+      obstacleBounds(
+        obstacle,
+        margin,
+        shouldRespectObstacleRotationInGraph(
+          input,
+          obstacle,
+          margin,
+          options.respectObstacleRotationInGraph,
+          options.gridPitch,
+        ),
+      ),
     );
   });
 
@@ -205,14 +216,24 @@ const getBlockingObstacleIndexes = (
   start: RoutingNode,
   end: RoutingNode,
   margin: number,
-  respectObstacleRotation: boolean,
+  options: NormalizedBiscuitBoardAutorouterOptions,
 ) =>
   input.obstacles.flatMap((obstacle, obstacleIndex) => {
     if (obstacle.isCopperPour || !obstacleIsOnLayer(obstacle, layer)) return [];
     return segmentIntersectsRectInterior(
       start,
       end,
-      obstacleBounds(obstacle, margin, respectObstacleRotation),
+      obstacleBounds(
+        obstacle,
+        margin,
+        shouldRespectObstacleRotationInGraph(
+          input,
+          obstacle,
+          margin,
+          options.respectObstacleRotationInGraph,
+          options.gridPitch,
+        ),
+      ),
     )
       ? [obstacleIndex]
       : [];
@@ -525,7 +546,17 @@ export const generateBiscuitBoardHypergraph = (
   const guidedTerminalKeys = new Set<string>();
   for (const obstacle of input.obstacles) {
     if (obstacle.isCopperPour || obstacle.netIsAssignable) continue;
-    const bounds = obstacleBounds(obstacle, maximumTraceMargin, false);
+    const bounds = obstacleBounds(
+      obstacle,
+      maximumTraceMargin,
+      shouldRespectObstacleRotationInGraph(
+        input,
+        obstacle,
+        maximumTraceMargin,
+        options.respectObstacleRotationInGraph,
+        options.gridPitch,
+      ),
+    );
     verticalSweepCoordinates.push(bounds.minX, bounds.maxX);
     horizontalSweepCoordinates.push(bounds.minY, bounds.maxY);
     specialPoints.push(
@@ -572,7 +603,17 @@ export const generateBiscuitBoardHypergraph = (
         if (obstacle.isCopperPour || !matchesConnection) {
           continue;
         }
-        const bounds = obstacleBounds(obstacle, maximumTraceMargin, false);
+        const bounds = obstacleBounds(
+          obstacle,
+          maximumTraceMargin,
+          shouldRespectObstacleRotationInGraph(
+            input,
+            obstacle,
+            maximumTraceMargin,
+            options.respectObstacleRotationInGraph,
+            options.gridPitch,
+          ),
+        );
         const escapePoints = [
           { x: bounds.minX, y: point.y },
           { x: bounds.maxX, y: point.y },
@@ -741,7 +782,7 @@ export const generateBiscuitBoardHypergraph = (
           point,
           maximumTraceMargin,
           special,
-          false,
+          options,
         ) &&
         special.terminalConnectionNames.length === 0 &&
         !special.prefabVia
@@ -837,7 +878,7 @@ export const generateBiscuitBoardHypergraph = (
         from,
         to,
         maximumTraceMargin,
-        options.respectObstacleRotationInGraph,
+        options,
       ),
       conflictEdgeIds: [],
       restrictedToConnectionName,

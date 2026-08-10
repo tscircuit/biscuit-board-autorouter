@@ -5,6 +5,7 @@ import {
   pointDistance,
   segmentDistance,
   segmentIntersectsRectInterior,
+  shouldRespectObstacleRotationInGraph,
   visualizePreparedProblem,
 } from "./geometry";
 import { MinHeap } from "./min-heap";
@@ -1315,7 +1316,13 @@ export class RipUpRubberBandSolver extends BaseSolver {
           obstacleBounds(
             obstacle,
             demand.width / 2 + clearance,
-            this.prepared.options.respectObstacleRotationInGraph,
+            shouldRespectObstacleRotationInGraph(
+              this.prepared.input,
+              obstacle,
+              demand.width / 2 + clearance,
+              this.prepared.options.respectObstacleRotationInGraph,
+              this.prepared.options.gridPitch,
+            ),
           ),
         )
       ) {

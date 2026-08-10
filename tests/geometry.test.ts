@@ -48,7 +48,7 @@ test("graph generation can reserve rotated obstacle envelopes", () => {
     obstacles: [
       {
         type: "rect",
-        center: { x: 5, y: 5 },
+        center: { x: 1, y: 5 },
         width: 1.2,
         height: 1.8,
         ccwRotationDegrees: 270,
@@ -66,14 +66,12 @@ test("graph generation can reserve rotated obstacle envelopes", () => {
     gridClearance: 0.1,
     respectObstacleRotationInGraph: true,
   });
-  const blockedEdgeCount = (graph: typeof withRotation) =>
-    graph.edges.filter(
-      (edge) =>
-        edge.kind === "trace" && edge.blockingObstacleIndexes.includes(0),
-    ).length;
+  const hasRotatedEnvelopeSweepNode = (graph: typeof withRotation) =>
+    graph.nodes.some(
+      (node) =>
+        Math.abs(node.x - 2.075) < 1e-6 && Math.abs(node.y - 4.665) < 1e-6,
+    );
 
-  expect(withRotation.nodes).toHaveLength(withoutRotation.nodes.length);
-  expect(blockedEdgeCount(withRotation)).toBeGreaterThan(
-    blockedEdgeCount(withoutRotation),
-  );
+  expect(hasRotatedEnvelopeSweepNode(withoutRotation)).toBe(false);
+  expect(hasRotatedEnvelopeSweepNode(withRotation)).toBe(true);
 });
