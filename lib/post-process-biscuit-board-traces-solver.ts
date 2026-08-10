@@ -569,14 +569,246 @@ const repairRotatedObstacleClearance = (
   throw new Error("Rotated-obstacle trace repair exceeded its iteration limit");
 };
 
+const repairTraceClearance = (
+  prepared: PreparedBiscuitRoutingProblem,
+  solution: BiscuitBoardRoutingSolution,
+  clearance: number,
+) => {
+  const traces = cloneTraces(solution.traces);
+  const maximumRepairs = traces.reduce(
+    (count, trace) => count + getSegments(trace).length,
+    0,
+  );
+
+  for (let repairCount = 0; repairCount < maximumRepairs; repairCount++) {
+    const workingSolution = { ...solution, traces };
+    const contexts = getTraceContexts(prepared, workingSolution);
+    let repaired = false;
+
+    for (let firstIndex = 0; firstIndex < contexts.length; firstIndex++) {
+      const first = contexts[firstIndex]!;
+      for (
+        let secondIndex = firstIndex + 1;
+        secondIndex < contexts.length;
+        secondIndex++
+      ) {
+        const second = contexts[secondIndex]!;
+        if (first.demand.netId === second.demand.netId) continue;
+
+        for (
+          let firstPointIndex = 1;
+          firstPointIndex < first.trace.route.length;
+          firstPointIndex++
+        ) {
+          const firstStart = first.trace.route[firstPointIndex - 1]!;
+          const firstEnd = first.trace.route[firstPointIndex]!;
+          if (
+            firstStart.route_type !== "wire" ||
+            firstEnd.route_type !== "wire" ||
+            firstStart.layer !== firstEnd.layer ||
+            pointsEqual(firstStart, firstEnd)
+          ) {
+            continue;
+          }
+
+          for (
+            let secondPointIndex = 1;
+            secondPointIndex < second.trace.route.length;
+            secondPointIndex++
+          ) {
+            const secondStart = second.trace.route[secondPointIndex - 1]!;
+            const secondEnd = second.trace.route[secondPointIndex]!;
+            if (
+              secondStart.route_type !== "wire" ||
+              secondEnd.route_type !== "wire" ||
+              secondStart.layer !== secondEnd.layer ||
+              firstStart.layer !== secondStart.layer ||
+              pointsEqual(secondStart, secondEnd)
+            ) {
+              continue;
+            }
+            const minimumCenterDistance =
+              firstStart.width / 2 + secondStart.width / 2 + clearance;
+            if (
+              segmentDistance(firstStart, firstEnd, secondStart, secondEnd) >=
+              minimumCenterDistance - EPSILON
+            ) {
+              continue;
+            }
+
+            const attempts = [
+              {
+                traceIndex: firstIndex,
+                pointIndex: firstPointIndex,
+                movingStart: firstStart,
+                movingEnd: firstEnd,
+                blockingStart: secondStart,
+                blockingEnd: secondEnd,
+              },
+              {
+                traceIndex: secondIndex,
+                pointIndex: secondPointIndex,
+                movingStart: secondStart,
+                movingEnd: secondEnd,
+                blockingStart: firstStart,
+                blockingEnd: firstEnd,
+              },
+            ];
+
+            for (const attempt of attempts) {
+              const margin =
+                attempt.movingStart.width / 2 +
+                attempt.blockingStart.width / 2 +
+                clearance +
+                1e-4;
+              const bounds = {
+                minX:
+                  Math.min(attempt.blockingStart.x, attempt.blockingEnd.x) -
+                  margin,
+                maxX:
+                  Math.max(attempt.blockingStart.x, attempt.blockingEnd.x) +
+                  margin,
+                minY:
+                  Math.min(attempt.blockingStart.y, attempt.blockingEnd.y) -
+                  margin,
+                maxY:
+                  Math.max(attempt.blockingStart.y, attempt.blockingEnd.y) +
+                  margin,
+              };
+              const candidatePointPaths: Point[][] = [
+                [
+                  attempt.movingStart,
+                  { x: bounds.minX, y: attempt.movingStart.y },
+                  { x: bounds.minX, y: attempt.movingEnd.y },
+                  attempt.movingEnd,
+                ],
+                [
+                  attempt.movingStart,
+                  { x: bounds.maxX, y: attempt.movingStart.y },
+                  { x: bounds.maxX, y: attempt.movingEnd.y },
+                  attempt.movingEnd,
+                ],
+                [
+                  attempt.movingStart,
+                  { x: attempt.movingStart.x, y: bounds.minY },
+                  { x: attempt.movingEnd.x, y: bounds.minY },
+                  attempt.movingEnd,
+                ],
+                [
+                  attempt.movingStart,
+                  { x: attempt.movingStart.x, y: bounds.maxY },
+                  { x: attempt.movingEnd.x, y: bounds.maxY },
+                  attempt.movingEnd,
+                ],
+              ];
+              for (const escapeDistance of [
+                margin + 0.1,
+                margin + 0.3,
+                margin + 0.6,
+              ]) {
+                for (const offset of [
+                  { x: escapeDistance, y: 0 },
+                  { x: -escapeDistance, y: 0 },
+                  { x: 0, y: escapeDistance },
+                  { x: 0, y: -escapeDistance },
+                ]) {
+                  candidatePointPaths.push(
+                    [
+                      attempt.movingStart,
+                      {
+                        x: attempt.movingStart.x + offset.x,
+                        y: attempt.movingStart.y + offset.y,
+                      },
+                      attempt.movingEnd,
+                    ],
+                    [
+                      attempt.movingStart,
+                      {
+                        x: attempt.movingEnd.x + offset.x,
+                        y: attempt.movingEnd.y + offset.y,
+                      },
+                      attempt.movingEnd,
+                    ],
+                  );
+                }
+              }
+              const boardMargin =
+                (prepared.input.minBoardEdgeClearance ?? 0) +
+                attempt.movingStart.width / 2;
+              const segmentHasClearance = createSegmentClearanceChecker(
+                prepared,
+                workingSolution,
+                attempt.traceIndex,
+                clearance,
+                false,
+              );
+              const candidates = candidatePointPaths
+                .map((path) =>
+                  collapseCollinearWirePoints(
+                    toWirePath(path, attempt.movingStart),
+                  ),
+                )
+                .filter((path) =>
+                  path.every(
+                    (point) =>
+                      point.x >= prepared.input.bounds.minX + boardMargin &&
+                      point.x <= prepared.input.bounds.maxX - boardMargin &&
+                      point.y >= prepared.input.bounds.minY + boardMargin &&
+                      point.y <= prepared.input.bounds.maxY - boardMargin,
+                  ),
+                )
+                .filter((path) =>
+                  path.slice(1).every((point, index) =>
+                    segmentHasClearance({
+                      start: path[index]!,
+                      end: point,
+                    }),
+                  ),
+                )
+                .sort(
+                  (left, right) =>
+                    wirePathLength(left) - wirePathLength(right) ||
+                    left.length - right.length,
+                );
+              const detour = candidates[0];
+              if (!detour) continue;
+
+              const route = [...traces[attempt.traceIndex]!.route];
+              route.splice(attempt.pointIndex - 1, 2, ...detour);
+              traces[attempt.traceIndex] = {
+                ...traces[attempt.traceIndex]!,
+                route,
+              };
+              repaired = true;
+              break;
+            }
+            if (repaired) break;
+          }
+          if (repaired) break;
+        }
+        if (repaired) break;
+      }
+      if (repaired) break;
+    }
+
+    if (!repaired) return traces;
+  }
+
+  throw new Error(
+    "Trace-to-trace clearance repair exceeded its iteration limit",
+  );
+};
+
 export const postProcessBiscuitBoardTraces = (
   prepared: PreparedBiscuitRoutingProblem,
   solution: BiscuitBoardRoutingSolution,
 ): BiscuitBoardRoutingSolution => {
   const clearance = getEffectiveTraceClearance(prepared);
+  let traces = repairTraceClearance(prepared, solution, clearance);
+  const repairedSolution = { ...solution, traces };
   const initialViolations = getTraceClearanceViolations(
     prepared,
-    solution,
+    repairedSolution,
     clearance,
     false,
   );
@@ -586,7 +818,7 @@ export const postProcessBiscuitBoardTraces = (
     );
   }
 
-  let traces = cloneTraces(solution.traces);
+  traces = cloneTraces(repairedSolution.traces);
   const protectedJunctionKeys = new Set<string>();
   for (const route of solution.routes) {
     const demand = prepared.demandById.get(route.routeId)!;
