@@ -33,6 +33,7 @@ const DEFAULT_OPTIONS: NormalizedBiscuitBoardAutorouterOptions = {
   routeOrder: "input",
   gridPitch: 1.5,
   gridClearance: 0.2,
+  respectObstacleRotationInGraph: false,
   viaTransitionCost: 20,
   ripCost: 10,
   crossingCost: 0.25,
@@ -173,6 +174,7 @@ const nodeIsBlocked = (
   point: Point,
   margin: number,
   special: ReturnType<typeof getSpecialNodeMetadata>,
+  respectObstacleRotation: boolean,
 ) =>
   input.obstacles.some((obstacle, obstacleIndex) => {
     if (obstacle.isCopperPour || !obstacleIsOnLayer(obstacle, layer))
@@ -193,7 +195,7 @@ const nodeIsBlocked = (
     // not force an unrelated whole-board rip-up negotiation.
     return pointStrictlyInsideRect(
       point,
-      obstacleBounds(obstacle, margin, false),
+      obstacleBounds(obstacle, margin, respectObstacleRotation),
     );
   });
 
@@ -203,13 +205,14 @@ const getBlockingObstacleIndexes = (
   start: RoutingNode,
   end: RoutingNode,
   margin: number,
+  respectObstacleRotation: boolean,
 ) =>
   input.obstacles.flatMap((obstacle, obstacleIndex) => {
     if (obstacle.isCopperPour || !obstacleIsOnLayer(obstacle, layer)) return [];
     return segmentIntersectsRectInterior(
       start,
       end,
-      obstacleBounds(obstacle, margin, false),
+      obstacleBounds(obstacle, margin, respectObstacleRotation),
     )
       ? [obstacleIndex]
       : [];
@@ -522,7 +525,11 @@ export const generateBiscuitBoardHypergraph = (
   const guidedTerminalKeys = new Set<string>();
   for (const obstacle of input.obstacles) {
     if (obstacle.isCopperPour || obstacle.netIsAssignable) continue;
-    const bounds = obstacleBounds(obstacle, maximumTraceMargin, false);
+    const bounds = obstacleBounds(
+      obstacle,
+      maximumTraceMargin,
+      options.respectObstacleRotationInGraph,
+    );
     verticalSweepCoordinates.push(bounds.minX, bounds.maxX);
     horizontalSweepCoordinates.push(bounds.minY, bounds.maxY);
     specialPoints.push(
@@ -569,7 +576,11 @@ export const generateBiscuitBoardHypergraph = (
         if (obstacle.isCopperPour || !matchesConnection) {
           continue;
         }
-        const bounds = obstacleBounds(obstacle, maximumTraceMargin, false);
+        const bounds = obstacleBounds(
+          obstacle,
+          maximumTraceMargin,
+          options.respectObstacleRotationInGraph,
+        );
         const escapePoints = [
           { x: bounds.minX, y: point.y },
           { x: bounds.maxX, y: point.y },
@@ -732,7 +743,14 @@ export const generateBiscuitBoardHypergraph = (
         continue;
       }
       if (
-        nodeIsBlocked(input, layer, point, maximumTraceMargin, special) &&
+        nodeIsBlocked(
+          input,
+          layer,
+          point,
+          maximumTraceMargin,
+          special,
+          options.respectObstacleRotationInGraph,
+        ) &&
         special.terminalConnectionNames.length === 0 &&
         !special.prefabVia
       ) {
@@ -827,6 +845,7 @@ export const generateBiscuitBoardHypergraph = (
         from,
         to,
         maximumTraceMargin,
+        options.respectObstacleRotationInGraph,
       ),
       conflictEdgeIds: [],
       restrictedToConnectionName,

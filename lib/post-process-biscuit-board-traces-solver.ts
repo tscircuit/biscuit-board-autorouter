@@ -519,84 +519,142 @@ const repairRotatedObstacleClearance = (
           { length: 21 },
           (_, index) => nudge + index * detourStep,
         );
-        const candidatePointPaths: Point[][] = detourOffsets.flatMap(
-          (offset) => {
+        const createCandidatePointPaths = (
+          candidateStart: WirePoint,
+          candidateEnd: WirePoint,
+        ): Point[][] =>
+          detourOffsets.flatMap((offset) => {
             const left = bounds.minX - offset;
             const right = bounds.maxX + offset;
             const bottom = bounds.minY - offset;
             const top = bounds.maxY + offset;
-            const firstX = start.x <= end.x ? left : right;
-            const secondX = start.x <= end.x ? right : left;
-            const firstY = start.y <= end.y ? bottom : top;
-            const secondY = start.y <= end.y ? top : bottom;
+            const firstX = candidateStart.x <= candidateEnd.x ? left : right;
+            const secondX = candidateStart.x <= candidateEnd.x ? right : left;
+            const firstY = candidateStart.y <= candidateEnd.y ? bottom : top;
+            const secondY = candidateStart.y <= candidateEnd.y ? top : bottom;
             return [
-              [start, { x: left, y: start.y }, { x: left, y: end.y }, end],
-              [start, { x: right, y: start.y }, { x: right, y: end.y }, end],
-              [start, { x: start.x, y: bottom }, { x: end.x, y: bottom }, end],
-              [start, { x: start.x, y: top }, { x: end.x, y: top }, end],
               [
-                start,
-                { x: firstX, y: start.y },
+                candidateStart,
+                { x: left, y: candidateStart.y },
+                { x: left, y: candidateEnd.y },
+                candidateEnd,
+              ],
+              [
+                candidateStart,
+                { x: right, y: candidateStart.y },
+                { x: right, y: candidateEnd.y },
+                candidateEnd,
+              ],
+              [
+                candidateStart,
+                { x: candidateStart.x, y: bottom },
+                { x: candidateEnd.x, y: bottom },
+                candidateEnd,
+              ],
+              [
+                candidateStart,
+                { x: candidateStart.x, y: top },
+                { x: candidateEnd.x, y: top },
+                candidateEnd,
+              ],
+              [
+                candidateStart,
+                { x: firstX, y: candidateStart.y },
                 { x: firstX, y: bottom },
                 { x: secondX, y: bottom },
-                { x: secondX, y: end.y },
-                end,
+                { x: secondX, y: candidateEnd.y },
+                candidateEnd,
               ],
               [
-                start,
-                { x: firstX, y: start.y },
+                candidateStart,
+                { x: firstX, y: candidateStart.y },
                 { x: firstX, y: top },
                 { x: secondX, y: top },
-                { x: secondX, y: end.y },
-                end,
+                { x: secondX, y: candidateEnd.y },
+                candidateEnd,
               ],
               [
-                start,
-                { x: start.x, y: firstY },
+                candidateStart,
+                { x: candidateStart.x, y: firstY },
                 { x: left, y: firstY },
                 { x: left, y: secondY },
-                { x: end.x, y: secondY },
-                end,
+                { x: candidateEnd.x, y: secondY },
+                candidateEnd,
               ],
               [
-                start,
-                { x: start.x, y: firstY },
+                candidateStart,
+                { x: candidateStart.x, y: firstY },
                 { x: right, y: firstY },
                 { x: right, y: secondY },
-                { x: end.x, y: secondY },
-                end,
+                { x: candidateEnd.x, y: secondY },
+                candidateEnd,
               ],
             ];
-          },
-        );
+          });
         const boardMargin =
           (prepared.input.minBoardEdgeClearance ?? 0) + start.width / 2;
-        const candidates = candidatePointPaths
-          .filter((path) =>
-            path
-              .slice(1, -1)
-              .every(
-                (point) =>
-                  point.x >= prepared.input.bounds.minX + boardMargin &&
-                  point.x <= prepared.input.bounds.maxX - boardMargin &&
-                  point.y >= prepared.input.bounds.minY + boardMargin &&
-                  point.y <= prepared.input.bounds.maxY - boardMargin,
-              ),
-          )
-          .map((path) => collapseCollinearWirePoints(toWirePath(path, start)))
-          .filter((path) =>
-            path
-              .slice(1)
-              .every((point, index) =>
-                segmentHasClearance({ start: path[index]!, end: point }),
-              ),
-          )
-          .sort(
-            (left, right) =>
-              wirePathLength(left) - wirePathLength(right) ||
-              left.length - right.length,
-          );
-        const detour = candidates[0];
+        const getValidDetours = (
+          candidateStart: WirePoint,
+          candidateEnd: WirePoint,
+        ) =>
+          createCandidatePointPaths(candidateStart, candidateEnd)
+            .filter((path) =>
+              path
+                .slice(1, -1)
+                .every(
+                  (point) =>
+                    point.x >= prepared.input.bounds.minX + boardMargin &&
+                    point.x <= prepared.input.bounds.maxX - boardMargin &&
+                    point.y >= prepared.input.bounds.minY + boardMargin &&
+                    point.y <= prepared.input.bounds.maxY - boardMargin,
+                ),
+            )
+            .map((path) =>
+              collapseCollinearWirePoints(toWirePath(path, candidateStart)),
+            )
+            .filter((path) =>
+              path
+                .slice(1)
+                .every((point, index) =>
+                  segmentHasClearance({ start: path[index]!, end: point }),
+                ),
+            )
+            .sort(
+              (left, right) =>
+                wirePathLength(left) - wirePathLength(right) ||
+                left.length - right.length,
+            );
+
+        let detour = getValidDetours(start, end)[0];
+        let detourStartIndex = pointIndex - 1;
+        let detourEndIndex = pointIndex;
+        if (!detour) {
+          for (let spanSize = 1; spanSize <= 8 && !detour; spanSize++) {
+            for (let before = 0; before <= spanSize; before++) {
+              const after = spanSize - before;
+              const startIndex = pointIndex - 1 - before;
+              const endIndex = pointIndex + after;
+              if (startIndex < 0 || endIndex >= route.length) continue;
+              const span = route.slice(startIndex, endIndex + 1);
+              if (
+                !span.every(
+                  (point) =>
+                    point.route_type === "wire" && point.layer === start.layer,
+                )
+              ) {
+                continue;
+              }
+              const spanStart = span[0] as WirePoint;
+              const spanEnd = span.at(-1) as WirePoint;
+              detour = getValidDetours(spanStart, spanEnd)[0];
+              if (detour) {
+                detourStartIndex = startIndex;
+                detourEndIndex = endIndex;
+                break;
+              }
+            }
+          }
+        }
         if (!detour) {
           const fallbackTrace = fallbackTraces[traceIndex];
           if (fallbackTrace && !restoredTraceIndexes.has(traceIndex)) {
@@ -612,7 +670,11 @@ const repairRotatedObstacleClearance = (
             `Could not detour trace "${context.route.routeId}" around rotated obstacle`,
           );
         }
-        route.splice(pointIndex - 1, 2, ...detour);
+        route.splice(
+          detourStartIndex,
+          detourEndIndex - detourStartIndex + 1,
+          ...detour,
+        );
         traces[traceIndex] = { ...context.trace, route };
         repaired = true;
         break;

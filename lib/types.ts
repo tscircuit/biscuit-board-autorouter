@@ -18,6 +18,8 @@ export interface BiscuitBoardAutorouterOptions {
   gridPitch?: number;
   /** Minimum edge-to-edge copper clearance used by graph generation and cleanup. */
   gridClearance?: number;
+  /** Use rotated obstacle envelopes during graph generation instead of deferring them to cleanup. */
+  respectObstacleRotationInGraph?: boolean;
   viaTransitionCost?: number;
   ripCost?: number;
   crossingCost?: number;
@@ -37,6 +39,7 @@ export interface NormalizedBiscuitBoardAutorouterOptions {
     | "input";
   gridPitch: number;
   gridClearance: number;
+  respectObstacleRotationInGraph: boolean;
   viaTransitionCost: number;
   ripCost: number;
   crossingCost: number;
