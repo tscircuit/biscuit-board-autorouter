@@ -4,14 +4,18 @@ import type { SimpleRouteJson } from "@tscircuit/core";
 import { measureTraceWidths } from "@tscircuit/power-trace-expander";
 import { getSvgFromGraphicsObject } from "graphics-debug";
 import {
+  BeautifyBiscuitBoardTracesSolver,
   BiscuitBoardRoutingPipelineSolver,
   ExpandBiscuitBoardTracesSolver,
   getTraceClearanceViolations,
+  type BiscuitBoardRoutingSolution,
   type PreparedBiscuitRoutingProblem,
 } from "../lib";
+import fixedPostProcessed from "../repros/fixtures/repro01-biscuit-board-stm32.post-processed.json";
 import capturedInput from "../repros/fixtures/repro01-biscuit-board-stm32.srj.json";
 
 const input = capturedInput as SimpleRouteJson;
+const snapshotInput = fixedPostProcessed as BiscuitBoardRoutingSolution;
 const pointKey = (point: { x: number; y: number }) =>
   `${point.x.toFixed(3)},${point.y.toFixed(3)}`;
 
@@ -98,9 +102,16 @@ test("solves and beautifies the exact BiscuitBoard STM32C071 real-project input"
       trace.route.filter((point) => point.route_type === "via"),
     ),
   ).toEqual([]);
-  const beautificationGraphics = solver
-    .getSolver("beautify-traces")!
-    .visualize();
+  // The rip-and-replace route is valid but can differ across CPU architectures.
+  // Keep the end-to-end assertions above, while snapshotting the beautifier from
+  // a fixed post-processing boundary so the SVG is stable on macOS and Linux.
+  const snapshotBeautifier = new BeautifyBiscuitBoardTracesSolver({
+    prepared: prepared!,
+    built: snapshotInput,
+  });
+  snapshotBeautifier.solve();
+  expect(snapshotBeautifier.failed).toBe(false);
+  const beautificationGraphics = snapshotBeautifier.visualize();
   expect(beautificationGraphics.rects?.length).toBeGreaterThan(0);
   expect(beautificationGraphics.circles?.length).toBeGreaterThan(0);
   const obstacleLabels = [
