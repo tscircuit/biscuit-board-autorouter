@@ -31,6 +31,8 @@ export interface BiscuitBoardAutorouterOptions {
   expansionsPerStep?: number;
   /** Expand routed copper toward its nominal width after clearance cleanup. */
   expandTraces?: boolean;
+  /** Improve trace spacing, consolidate same-net copper, and chamfer corners. */
+  beautifyTraces?: boolean;
 }
 
 export interface NormalizedBiscuitBoardAutorouterOptions {
@@ -151,6 +153,9 @@ export interface BiscuitBoardRoutingStats {
   postProcessedClearance?: number;
   preSimplificationSegmentCount?: number;
   postSimplificationSegmentCount?: number;
+  beautifiedClearance?: number;
+  sameNetConsolidationCount?: number;
+  fortyFiveDegreeChamferCount?: number;
 }
 
 export interface BiscuitBoardRoutingSolution {

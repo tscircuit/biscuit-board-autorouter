@@ -5,6 +5,7 @@ import {
   type PipelineStep,
 } from "@tscircuit/solver-utils";
 import type { GraphicsObject } from "graphics-debug";
+import { BeautifyBiscuitBoardTracesSolver } from "./beautify-biscuit-board-traces-solver";
 import { BuildBiscuitBoardTracesSolver } from "./build-biscuit-board-traces-solver";
 import { ExpandBiscuitBoardTracesSolver } from "./expand-biscuit-board-traces-solver";
 import { GenerateBiscuitBoardHypergraphSolver } from "./generate-biscuit-board-hypergraph-solver";
@@ -71,8 +72,8 @@ export class BiscuitBoardRoutingPipelineSolver extends BasePipelineSolver<Simple
       },
     ),
     definePipelineStep(
-      "expand-traces",
-      ExpandBiscuitBoardTracesSolver,
+      "beautify-traces",
+      BeautifyBiscuitBoardTracesSolver,
       (instance: BiscuitBoardRoutingPipelineSolver) => {
         const prepared = instance.getStageOutput<PreparedBiscuitRoutingProblem>(
           "generate-hypergraph",
@@ -80,6 +81,29 @@ export class BiscuitBoardRoutingPipelineSolver extends BasePipelineSolver<Simple
         const built = instance.getStageOutput<BiscuitBoardRoutingSolution>(
           "post-process-traces",
         );
+        if (!prepared || !built) {
+          throw new Error("Trace beautification inputs are unavailable");
+        }
+        return [
+          {
+            prepared,
+            built,
+            enabled: instance.options.beautifyTraces,
+          },
+        ];
+      },
+    ),
+    definePipelineStep(
+      "expand-traces",
+      ExpandBiscuitBoardTracesSolver,
+      (instance: BiscuitBoardRoutingPipelineSolver) => {
+        const prepared = instance.getStageOutput<PreparedBiscuitRoutingProblem>(
+          "generate-hypergraph",
+        );
+        const built =
+          instance.getStageOutput<BiscuitBoardRoutingSolution>(
+            "beautify-traces",
+          );
         if (!prepared || !built) {
           throw new Error("Trace expansion inputs are unavailable");
         }
