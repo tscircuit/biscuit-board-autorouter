@@ -20,6 +20,7 @@ type WirePoint = Extract<RoutePoint, { route_type: "wire" }>;
 const EPSILON = 1e-7;
 const CHAMFER_SEARCH_STEPS = 16;
 const CLEARANCE_SEARCH_STEPS = 4;
+const BEAUTIFICATION_CLEARANCE_TARGET = 0.4;
 
 const cloneTraces = (traces: SimplifiedPcbTrace[]) =>
   traces.map((trace) => ({
@@ -415,9 +416,10 @@ const maximizeClearance = (
   solution: BiscuitBoardRoutingSolution,
 ) => {
   const minimumClearance = getEffectiveTraceClearance(prepared);
-  const desiredClearance =
-    minimumClearance +
-    Math.min(0.2, Math.max(minimumClearance, prepared.input.minTraceWidth));
+  const desiredClearance = Math.max(
+    minimumClearance,
+    BEAUTIFICATION_CLEARANCE_TARGET,
+  );
   if (desiredClearance <= minimumClearance + EPSILON) {
     return {
       solution,
@@ -521,7 +523,6 @@ export class BeautifyBiscuitBoardTracesSolver extends BaseSolver {
     public readonly params: {
       prepared: PreparedBiscuitRoutingProblem;
       built: BiscuitBoardRoutingSolution;
-      enabled?: boolean;
     },
   ) {
     super();
@@ -532,10 +533,10 @@ export class BeautifyBiscuitBoardTracesSolver extends BaseSolver {
   }
 
   override _step() {
-    this.output =
-      this.params.enabled === false
-        ? this.params.built
-        : beautifyBiscuitBoardTraces(this.params.prepared, this.params.built);
+    this.output = beautifyBiscuitBoardTraces(
+      this.params.prepared,
+      this.params.built,
+    );
     this.stats = this.output.stats;
     this.progress = 1;
     this.solved = true;

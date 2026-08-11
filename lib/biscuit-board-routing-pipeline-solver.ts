@@ -84,13 +84,7 @@ export class BiscuitBoardRoutingPipelineSolver extends BasePipelineSolver<Simple
         if (!prepared || !built) {
           throw new Error("Trace beautification inputs are unavailable");
         }
-        return [
-          {
-            prepared,
-            built,
-            enabled: instance.options.beautifyTraces,
-          },
-        ];
+        return [{ prepared, built }];
       },
     ),
     definePipelineStep(
@@ -141,6 +135,13 @@ export class BiscuitBoardRoutingPipelineSolver extends BasePipelineSolver<Simple
 
   override initialVisualize(): GraphicsObject {
     return visualizeSimpleRouteJsonInput(this.inputProblem);
+  }
+
+  override visualize(): GraphicsObject {
+    if (this.solved) {
+      return this.getSolver("expand-traces")?.visualize() ?? super.visualize();
+    }
+    return super.visualize();
   }
 
   override getOutput(): BiscuitBoardRoutingSolution | null {
