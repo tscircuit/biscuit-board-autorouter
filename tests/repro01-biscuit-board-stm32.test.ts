@@ -1,6 +1,8 @@
+import "bun-match-svg";
 import { expect, test } from "bun:test";
 import type { SimpleRouteJson } from "@tscircuit/core";
 import { measureTraceWidths } from "@tscircuit/power-trace-expander";
+import { getSvgFromGraphicsObject } from "graphics-debug";
 import {
   BiscuitBoardRoutingPipelineSolver,
   ExpandBiscuitBoardTracesSolver,
@@ -13,7 +15,7 @@ const input = capturedInput as SimpleRouteJson;
 const pointKey = (point: { x: number; y: number }) =>
   `${point.x.toFixed(3)},${point.y.toFixed(3)}`;
 
-test("solves the exact BiscuitBoard STM32C071 real-project input", () => {
+test("solves and beautifies the exact BiscuitBoard STM32C071 real-project input", async () => {
   const assignableViaPositions = new Set(
     input.obstacles
       .filter((obstacle) => obstacle.netIsAssignable)
@@ -96,4 +98,25 @@ test("solves the exact BiscuitBoard STM32C071 real-project input", () => {
       trace.route.filter((point) => point.route_type === "via"),
     ),
   ).toEqual([]);
+  const beautificationGraphics = solver
+    .getSolver("beautify-traces")!
+    .visualize();
+  expect(beautificationGraphics.rects?.length).toBeGreaterThan(0);
+  expect(beautificationGraphics.circles?.length).toBeGreaterThan(0);
+  const obstacleLabels = [
+    ...(beautificationGraphics.rects ?? []),
+    ...(beautificationGraphics.circles ?? []),
+  ].map((shape) => shape.label ?? "");
+  expect(obstacleLabels.some((label) => label.startsWith("obstacle ·"))).toBe(
+    true,
+  );
+  expect(
+    obstacleLabels.some((label) => label.includes("prefabricated via")),
+  ).toBe(true);
+  const svg = getSvgFromGraphicsObject(beautificationGraphics, {
+    backgroundColor: "white",
+    svgWidth: 1200,
+    svgHeight: 900,
+  });
+  await expect(svg).toMatchSvgSnapshot(import.meta.path);
 }, 30_000);

@@ -1,7 +1,11 @@
 import type { SimplifiedPcbTrace } from "@tscircuit/core";
 import { BaseSolver } from "@tscircuit/solver-utils";
 import type { GraphicsObject } from "graphics-debug";
-import { netColor, pointsEqual } from "./geometry";
+import {
+  netColor,
+  pointsEqual,
+  visualizeSimpleRouteJsonInput,
+} from "./geometry";
 import {
   getEffectiveTraceClearance,
   getTraceClearanceViolations,
@@ -489,32 +493,39 @@ export const beautifyBiscuitBoardTraces = (
 };
 
 const visualizeTraces = (
+  prepared: PreparedBiscuitRoutingProblem,
   input: BiscuitBoardRoutingSolution,
   output: BiscuitBoardRoutingSolution,
-): GraphicsObject => ({
-  coordinateSystem: "cartesian",
-  title: `Trace beautification (${output.stats.beautifiedClearance ?? output.stats.postProcessedClearance ?? 0}mm clearance, ${output.stats.sameNetConsolidationCount ?? 0} consolidated spans, ${output.stats.fortyFiveDegreeChamferCount ?? 0} 45-degree corners)`,
-  lines: [
-    ...input.traces.flatMap((trace) =>
-      getWireSegments(trace).map((segment) => ({
-        points: [segment.start, segment.end],
-        strokeColor: "rgba(100,116,139,0.28)",
-        strokeWidth: Math.min(segment.start.width, 0.07),
-        strokeDash: [0.12, 0.08],
-        label: "pre-beautification trace",
-      })),
-    ),
-    ...output.routes.flatMap((route, traceIndex) =>
-      getWireSegments(output.traces[traceIndex]!).map((segment) => ({
-        points: [segment.start, segment.end],
-        strokeColor: netColor(route.netId),
-        strokeWidth: segment.start.width,
-        zIndex: 2,
-        label: `beautified trace · ${route.netId}`,
-      })),
-    ),
-  ],
-});
+): GraphicsObject => {
+  const boardGraphics = visualizeSimpleRouteJsonInput(prepared.input);
+  return {
+    coordinateSystem: "cartesian",
+    title: `Trace beautification (${output.stats.beautifiedClearance ?? output.stats.postProcessedClearance ?? 0}mm clearance, ${output.stats.sameNetConsolidationCount ?? 0} consolidated spans, ${output.stats.fortyFiveDegreeChamferCount ?? 0} 45-degree corners)`,
+    rects: boardGraphics.rects,
+    circles: boardGraphics.circles,
+    points: boardGraphics.points,
+    lines: [
+      ...input.traces.flatMap((trace) =>
+        getWireSegments(trace).map((segment) => ({
+          points: [segment.start, segment.end],
+          strokeColor: "rgba(100,116,139,0.28)",
+          strokeWidth: Math.min(segment.start.width, 0.07),
+          strokeDash: [0.12, 0.08],
+          label: "pre-beautification trace",
+        })),
+      ),
+      ...output.routes.flatMap((route, traceIndex) =>
+        getWireSegments(output.traces[traceIndex]!).map((segment) => ({
+          points: [segment.start, segment.end],
+          strokeColor: netColor(route.netId),
+          strokeWidth: segment.start.width,
+          zIndex: 2,
+          label: `beautified trace · ${route.netId}`,
+        })),
+      ),
+    ],
+  };
+};
 
 export class BeautifyBiscuitBoardTracesSolver extends BaseSolver {
   private output?: BiscuitBoardRoutingSolution;
@@ -547,6 +558,10 @@ export class BeautifyBiscuitBoardTracesSolver extends BaseSolver {
   }
 
   override visualize(): GraphicsObject {
-    return visualizeTraces(this.params.built, this.output ?? this.params.built);
+    return visualizeTraces(
+      this.params.prepared,
+      this.params.built,
+      this.output ?? this.params.built,
+    );
   }
 }

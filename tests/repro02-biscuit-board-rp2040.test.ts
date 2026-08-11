@@ -149,7 +149,20 @@ test("beautifies the solved BiscuitBoard RP2040 repro02 SVG", async () => {
   expect(beautified.stats.fortyFiveDegreeChamferCount).toBeGreaterThan(0);
   expect(getTraceClearanceViolations(problem, beautified)).toEqual([]);
 
-  const svg = getSvgFromGraphicsObject(beautifier.visualize(), {
+  const beautificationGraphics = beautifier.visualize();
+  expect(beautificationGraphics.rects?.length).toBeGreaterThan(0);
+  expect(beautificationGraphics.circles?.length).toBeGreaterThan(0);
+  const obstacleLabels = [
+    ...(beautificationGraphics.rects ?? []),
+    ...(beautificationGraphics.circles ?? []),
+  ].map((shape) => shape.label ?? "");
+  expect(obstacleLabels.some((label) => label.startsWith("obstacle ·"))).toBe(
+    true,
+  );
+  expect(
+    obstacleLabels.some((label) => label.includes("prefabricated via")),
+  ).toBe(true);
+  const svg = getSvgFromGraphicsObject(beautificationGraphics, {
     backgroundColor: "white",
     svgWidth: 1200,
     svgHeight: 900,
