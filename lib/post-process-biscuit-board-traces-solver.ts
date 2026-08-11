@@ -318,6 +318,45 @@ const createSegmentClearanceChecker = (
   };
 };
 
+/**
+ * Checks a replacement route against every foreign-net trace and obstacle.
+ * The trace being replaced is intentionally omitted from the comparison so
+ * post-processing stages can evaluate candidates without mutating a solution.
+ */
+export const traceRouteHasClearance = (
+  prepared: PreparedBiscuitRoutingProblem,
+  solution: BiscuitBoardRoutingSolution,
+  traceIndex: number,
+  route: SimplifiedPcbTrace["route"],
+  clearance = getEffectiveTraceClearance(prepared),
+) => {
+  const segmentHasClearance = createSegmentClearanceChecker(
+    prepared,
+    solution,
+    traceIndex,
+    clearance,
+  );
+  return getSegments({ ...solution.traces[traceIndex]!, route }).every(
+    segmentHasClearance,
+  );
+};
+
+export const traceSegmentsHaveClearance = (
+  prepared: PreparedBiscuitRoutingProblem,
+  solution: BiscuitBoardRoutingSolution,
+  traceIndex: number,
+  segments: Array<{ start: WirePoint; end: WirePoint }>,
+  clearance = getEffectiveTraceClearance(prepared),
+) => {
+  const segmentHasClearance = createSegmentClearanceChecker(
+    prepared,
+    solution,
+    traceIndex,
+    clearance,
+  );
+  return segments.every(segmentHasClearance);
+};
+
 // Adapted from tscircuit-autorouter's calculate45DegreePaths utility. Each
 // candidate contains at most one bend and uses only 0, 45, or 90 degree axes.
 const calculate45DegreePaths = (start: Point, end: Point): Point[][] => {

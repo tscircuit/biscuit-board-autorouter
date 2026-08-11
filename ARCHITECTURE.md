@@ -63,7 +63,7 @@ throws instead of silently manufacturing copper.
 
 ## Trace post-processing
 
-The final pipeline stage validates 0.2 mm edge-to-edge copper clearance against
+The mandatory cleanup stage validates 0.2 mm edge-to-edge copper clearance against
 foreign-net traces, pads, and prefabricated vias. Between immutable layer-change
 boundaries, it greedily extends a shortcut head across the original route and
 generates only Manhattan/45-degree candidates. This follows the trace
@@ -72,6 +72,22 @@ clear candidate is committed while the remaining routed traces are treated as
 immutable copper. Every candidate segment is checked independently against the
 same clearance model, and the complete output is validated again before it is
 returned.
+
+## Trace beautification
+
+The beautification stage runs after mandatory clearance cleanup and before
+nominal-width expansion. It first searches for a larger board-wide clearance,
+but treats that increase as opportunistic so a tightly constrained board still
+keeps its already-valid route. Same-net traces may then reuse the shorter path
+between two shared junctions. This makes electrically identical branches render
+as one copper path without moving terminals, removing fixed-via transitions, or
+lengthening a connection.
+
+Finally, every unprotected rectilinear corner is chamfered. The stage starts at
+the full length of the shorter incident segment and searches down for the
+largest 45-degree cut that preserves the achieved clearance. Shared junctions
+remain fixed, and the completed solution is checked again before it is passed
+to the expander.
 
 ## Nominal-width expansion
 

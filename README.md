@@ -40,7 +40,11 @@ The exported `BiscuitBoardAutorouter` also implements tscircuit's
    greedily replaces whole stair-step runs with clearance-safe Manhattan/45°
    shortcuts. Its visualization overlays the original routes, obstacle/pad
    geometry, clearance envelopes, prefabricated vias, and simplified traces.
-5. `ExpandBiscuitBoardTracesSolver` uses
+5. `BeautifyBiscuitBoardTracesSolver` opportunistically increases the spacing
+   between foreign nets, consolidates same-net spans onto shared copper, and
+   replaces each remaining Manhattan corner with the largest clearance-safe
+   45° chamfer.
+6. `ExpandBiscuitBoardTracesSolver` uses
    `@tscircuit/power-trace-expander` to widen the cleaned routes toward each
    connection's `nominalTraceWidth`. It may shove narrower traces or detour
    around obstacles, but disables new vias, revalidates clearance and the

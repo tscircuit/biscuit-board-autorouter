@@ -91,6 +91,24 @@ describe("fixed-via invariant", () => {
     solver.solve();
     expect(solver.solved).toBe(true);
 
+    const wireCoordinates = solver
+      .getOutput()!
+      .traces[0]!.route.flatMap((point) =>
+        point.route_type === "wire"
+          ? [[point.x, point.y, point.layer] as const]
+          : [],
+      );
+    expect(wireCoordinates).toEqual([
+      [-5.5, 0, "top"],
+      [-1.5, 4, "top"],
+      [0, 4, "top"],
+      [0, 4, "bottom"],
+      [1.5, 4, "bottom"],
+      [5.5, 0, "bottom"],
+    ]);
+    expect(wireCoordinates).not.toContainEqual([-5.5, 4, "top"]);
+    expect(wireCoordinates).not.toContainEqual([5.5, 4, "bottom"]);
+
     const postProcessGraphics = solver
       .getSolver("post-process-traces")
       ?.visualize();

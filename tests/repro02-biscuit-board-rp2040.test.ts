@@ -4,6 +4,7 @@ import type { SimpleRouteJson } from "@tscircuit/core";
 import { measureTraceWidths } from "@tscircuit/power-trace-expander";
 import { getSvgFromGraphicsObject } from "graphics-debug";
 import {
+  BeautifyBiscuitBoardTracesSolver,
   generateBiscuitBoardHypergraph,
   getTraceClearanceViolations,
   ExpandBiscuitBoardTracesSolver,
@@ -63,6 +64,16 @@ const getPrepared = () =>
     maxTotalRips: 10_000,
     routeOrder: "signal_longest_first",
   }));
+let beautifier: BeautifyBiscuitBoardTracesSolver | undefined;
+const getBeautifier = () => {
+  if (beautifier) return beautifier;
+  beautifier = new BeautifyBiscuitBoardTracesSolver({
+    prepared: getPrepared(),
+    built: solved,
+  });
+  beautifier.solve();
+  return beautifier;
+};
 
 test("preserves the exact BiscuitBoard RP2040 routing reproduction", () => {
   expect(input.connections).toHaveLength(35);
@@ -85,7 +96,7 @@ test("preserves the exact BiscuitBoard RP2040 routing reproduction", () => {
   ).toHaveLength(54);
 }, 30_000);
 
-test("matches the solved BiscuitBoard RP2040 repro02 SVG", async () => {
+test("beautifies the solved BiscuitBoard RP2040 repro02 SVG", async () => {
   const problem = getPrepared();
   const solver = new PostProcessBiscuitBoardTracesSolver({
     prepared: problem,
@@ -131,14 +142,34 @@ test("matches the solved BiscuitBoard RP2040 repro02 SVG", async () => {
     ),
   ).toBe(true);
 
-  const svg = getSvgFromGraphicsObject(solver.visualize(), {
+  const beautifier = getBeautifier();
+  expect(beautifier.failed).toBe(false);
+  const beautified = beautifier.getOutput()!;
+  expect(beautified.traces).not.toEqual(output!.traces);
+  expect(beautified.stats.fortyFiveDegreeChamferCount).toBeGreaterThan(0);
+  expect(getTraceClearanceViolations(problem, beautified)).toEqual([]);
+
+  const beautificationGraphics = beautifier.visualize();
+  expect(beautificationGraphics.rects?.length).toBeGreaterThan(0);
+  expect(beautificationGraphics.circles?.length).toBeGreaterThan(0);
+  const obstacleLabels = [
+    ...(beautificationGraphics.rects ?? []),
+    ...(beautificationGraphics.circles ?? []),
+  ].map((shape) => shape.label ?? "");
+  expect(obstacleLabels.some((label) => label.startsWith("obstacle ·"))).toBe(
+    true,
+  );
+  expect(
+    obstacleLabels.some((label) => label.includes("prefabricated via")),
+  ).toBe(true);
+  const svg = getSvgFromGraphicsObject(beautificationGraphics, {
     backgroundColor: "white",
     svgWidth: 1200,
     svgHeight: 900,
   });
 
   await expect(svg).toMatchSvgSnapshot(import.meta.path);
-}, 30_000);
+}, 60_000);
 
 test("expands the RP2040 repro toward a 0.3mm nominal width", () => {
   const baseProblem = getPrepared();

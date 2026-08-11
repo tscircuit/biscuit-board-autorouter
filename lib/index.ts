@@ -1,5 +1,6 @@
 export * from "./biscuit-board-autorouter";
 export * from "./biscuit-board-routing-pipeline-solver";
+export * from "./beautify-biscuit-board-traces-solver";
 export * from "./build-biscuit-board-traces-solver";
 export * from "./expand-biscuit-board-traces-solver";
 export * from "./generate-biscuit-board-hypergraph-solver";

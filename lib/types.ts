@@ -151,6 +151,9 @@ export interface BiscuitBoardRoutingStats {
   postProcessedClearance?: number;
   preSimplificationSegmentCount?: number;
   postSimplificationSegmentCount?: number;
+  beautifiedClearance?: number;
+  sameNetConsolidationCount?: number;
+  fortyFiveDegreeChamferCount?: number;
 }
 
 export interface BiscuitBoardRoutingSolution {
