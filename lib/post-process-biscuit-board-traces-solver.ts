@@ -1275,8 +1275,9 @@ const visualizeTraces = (
       points: [segment.start, segment.end],
       strokeColor: color,
       strokeWidth: segment.start.width,
+      strokeDash: segment.start.layer === "bottom" ? [6, 4] : undefined,
       zIndex: 2,
-      label: `simplified trace · ${route.netId}`,
+      label: `simplified trace · ${route.netId} · ${segment.start.layer}`,
     }));
   });
   return {
