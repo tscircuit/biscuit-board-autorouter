@@ -62,3 +62,35 @@ trace geometry.
 The SVG regression test runs the complete routing pipeline, then snapshots the
 combined BTN1/BTN2 center bounds with a 5 mm margin on every side. The crop
 keeps both buttons and the irregular traces between them visible.
+
+## Repro 05 · STM32 display redundant GND branch
+
+- Source: `tscircuit/biscuit-boards` at
+  `02aa0f8685883f3251572ab422d448b65681f064`
+- Autorouter revision used by that source: `199bc1be13f7daa3fb3f8164dd5fb607f69bdf0f`
+- Circuit: `examples/stm32c071-display.tsx`
+- Capture point: the normalized `SimpleRouteJson` passed to
+  `BiscuitBoardAutorouter`
+- Input: 17 merged connections, 119 obstacles, 2 layers, and 33 routing
+  demands
+
+`C_MCU.pin2` (`pcb_port_199`), `C_NRST.pin2` (`pcb_port_201`), and
+`D_PWR.cathode` (`pcb_port_207`) are all on the merged GND connection
+`source_net_0`. The prefabricated via at `(12.75, 19.5)` is assigned to the
+same net while routing.
+
+The current output creates three relevant branches:
+
+1. `C_MCU` to `C_NRST`;
+2. `C_NRST` to `D_PWR`; and
+3. `C_MCU` to the prefabricated via.
+
+Branch 3 crosses branch 2 before reaching the via. Copper from `C_MCU` to that
+crossing is redundant because `C_MCU` is already connected to `C_NRST` by
+branch 1. The via branch should begin at the crossing with the
+`C_NRST`–`D_PWR` trace instead of continuing back to `C_MCU` and forming a
+same-net loop.
+
+The SVG regression test snapshots the complete local topology from `C_MCU`
+through `C_NRST` and `D_PWR` to the via. Its red overlay marks the redundant
+portion and its green overlay marks the portion still needed to reach the via.
