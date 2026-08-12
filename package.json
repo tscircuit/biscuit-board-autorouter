@@ -36,7 +36,7 @@
     "@tscircuit/power-trace-expander": "github:tscircuit/power-trace-expander#6fa2ac79cf13129c47432db3a23e61c17067e912",
     "@tscircuit/props": "^0.0.617",
     "@tscircuit/solver-utils": "^0.0.17",
-    "graphics-debug": "^0.0.93"
+    "graphics-debug": "0.0.99"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.6",
