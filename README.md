@@ -71,9 +71,16 @@ Cosmos exposes the generated hypergraph and every live pipeline stage through
 - `examples/exampleXX.page.tsx` contains small synthetic inputs that isolate
   one solver behavior.
 - `repros/reproXX.page.tsx` contains exact, checked-in autorouter inputs
-  captured from real projects. Repro 01 is the complete BiscuitBoard
-  STM32C071FBP6 routing problem; Repro 02 is the complete RP2040 board and is
-  also the input to `benchmark.sh`.
+  captured from real projects. `benchmark.sh` runs the four unique complete
+  board problems: STM32C071FBP6, RP2040, the STM32 display board, and the STM32
+  display BoosterPack.
+
+The benchmark cases deliberately omit `routeOrder`. This makes the suite
+measure the autorouter's default selection while retaining each board's other
+problem-specific tuning. Run `./benchmark.sh --list` to see case IDs or
+`./benchmark.sh --case=stm32` to isolate one case. Each case has a default
+three-minute timeout so dense inputs such as RP2040 can make meaningful
+progress without blocking the suite indefinitely.
 
 Tests include SVG matching, forced layer transitions, the
 no-prefabricated-via failure case, negotiated rip-and-replace, and the complete
