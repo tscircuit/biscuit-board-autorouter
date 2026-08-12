@@ -44,7 +44,7 @@ connectivity state in the JSON report.
   `autorouter.algorithmFn`
 - Input: 17 merged connections, 119 obstacles, 2 layers, and 33 routing demands
 
-The SVG regression test runs the complete routing pipeline, then snapshots the
-10 mm square centered on `R_USER_LED`. This makes the requested 5 mm region on
-every side of the resistor visible and guards against irregular geometry when
-the nearby trace expands to its nominal width.
+The SVG regression tests run the complete routing pipeline, then snapshot the
+10 mm squares centered on `R_USER_LED` and the `R_PWR_LED`/`D_PWR` pair. This
+makes a 5 mm region on every side of each focus visible and guards against
+irregular geometry when nearby traces expand to their nominal width.

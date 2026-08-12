@@ -1,6 +1,7 @@
 import { BaseSolver } from "@tscircuit/solver-utils";
 import type { GraphicsObject } from "graphics-debug";
 import {
+  EXPANSION_CLEARANCE_GUARD,
   getTerminalEscapeMinimumRun,
   obstacleBounds,
   pointDistance,
@@ -645,24 +646,36 @@ const buildBiscuitBoardHypergraph = (
         if (obstacle.isCopperPour || !matchesConnection) {
           continue;
         }
-        const bounds = obstacleBounds(
-          obstacle,
-          maximumTraceMargin,
-          graphUsesRotatedObstacleBounds(
-            input,
+        const escapeBounds = [maximumTraceMargin];
+        if (maximumNominalTraceMargin > maximumTraceMargin + 1e-7) {
+          // Keep the physical-width boundary as a fallback, while adding a
+          // second corridor where a trace can turn without requiring the
+          // expansion pass to repair its clearance around neighboring pads.
+          escapeBounds.push(
+            maximumNominalTraceMargin + EXPANSION_CLEARANCE_GUARD,
+          );
+        }
+        const terminalEscapeBounds = escapeBounds.map((margin) =>
+          obstacleBounds(
             obstacle,
-            obstacleIndex,
-            maximumTraceMargin,
-            options,
+            margin,
+            graphUsesRotatedObstacleBounds(
+              input,
+              obstacle,
+              obstacleIndex,
+              margin,
+              options,
+            ),
           ),
         );
-        const escapePoints = [
-          { x: bounds.minX, y: point.y },
-          { x: bounds.maxX, y: point.y },
-          { x: point.x, y: bounds.minY },
-          { x: point.x, y: bounds.maxY },
-        ];
-        specialPoints.push(...escapePoints);
+        for (const bounds of terminalEscapeBounds) {
+          specialPoints.push(
+            { x: bounds.minX, y: point.y },
+            { x: bounds.maxX, y: point.y },
+            { x: point.x, y: bounds.minY },
+            { x: point.x, y: bounds.maxY },
+          );
+        }
         const terminalLayers = point.layers ?? [point.layer];
         if (matchesTerminal && connection.pointsToConnect.length === 2) {
           const other = connection.pointsToConnect.find(
@@ -740,12 +753,14 @@ const buildBiscuitBoardHypergraph = (
             }
           }
         };
-        if (obstacle.width >= obstacle.height) {
-          addDiagonalLandings(bounds.minX, "x");
-          addDiagonalLandings(bounds.maxX, "x");
-        } else {
-          addDiagonalLandings(bounds.minY, "y");
-          addDiagonalLandings(bounds.maxY, "y");
+        for (const bounds of terminalEscapeBounds) {
+          if (obstacle.width >= obstacle.height) {
+            addDiagonalLandings(bounds.minX, "x");
+            addDiagonalLandings(bounds.maxX, "x");
+          } else {
+            addDiagonalLandings(bounds.minY, "y");
+            addDiagonalLandings(bounds.maxY, "y");
+          }
         }
       }
     }
