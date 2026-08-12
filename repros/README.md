@@ -44,7 +44,21 @@ connectivity state in the JSON report.
   `autorouter.algorithmFn`
 - Input: 17 merged connections, 119 obstacles, 2 layers, and 33 routing demands
 
-The SVG regression tests run the complete routing pipeline, then snapshot the
-10 mm squares centered on `R_USER_LED` and the `R_PWR_LED`/`D_PWR` pair. This
-makes a 5 mm region on every side of each focus visible and guards against
-irregular geometry when nearby traces expand to their nominal width.
+The SVG regression test runs the complete routing pipeline, then snapshots the
+10 mm square centered on `R_USER_LED`. This makes the requested 5 mm region on
+every side of the resistor visible while preserving the currently irregular
+trace geometry.
+
+## Repro 04 · STM32 display board BTN1/BTN2 traces
+
+- Source: `tscircuit/biscuit-boards` at
+  `78dbe6523daadc0d8fc88e4c20cac893ecbe76b7`, with the display-header pin-map
+  correction from the source worktree applied
+- Circuit: `examples/stm32c071-display.tsx`
+- Capture point: the normalized `SimpleRouteJson` passed to `BiscuitBoard`'s
+  `autorouter.algorithmFn`
+- Input: 17 merged connections, 119 obstacles, 2 layers, and 33 routing demands
+
+The SVG regression test runs the complete routing pipeline, then snapshots the
+combined BTN1/BTN2 center bounds with a 5 mm margin on every side. The crop
+keeps both buttons and the irregular traces between them visible.
