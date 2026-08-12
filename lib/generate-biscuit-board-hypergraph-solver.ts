@@ -381,6 +381,7 @@ const buildDemands = (
         }
       }
       const target = remaining.splice(bestRemainingIndex, 1)[0]!;
+      const width = connection.width ?? input.minTraceWidth;
       demands.push({
         routeId: `${connection.name}:${branchIndex++}`,
         connectionName: connection.name,
@@ -392,7 +393,11 @@ const buildDemands = (
         targetNode: target.node!,
         sourcePointId: bestConnected.point.pointId,
         targetPointId: target.point.pointId,
-        width: connection.width ?? input.minTraceWidth,
+        width,
+        nominalWidth: Math.max(
+          width,
+          connection.nominalTraceWidth ?? input.nominalTraceWidth ?? width,
+        ),
       });
       connected.push(target);
     }
@@ -518,11 +523,25 @@ const buildBiscuitBoardHypergraph = (
       (connection) => connection.width ?? input.minTraceWidth,
     ),
   );
+  const maximumNominalTraceWidth = Math.max(
+    maximumTraceWidth,
+    ...input.connections.map((connection) =>
+      Math.max(
+        connection.width ?? input.minTraceWidth,
+        connection.nominalTraceWidth ??
+          input.nominalTraceWidth ??
+          connection.width ??
+          input.minTraceWidth,
+      ),
+    ),
+  );
   const effectiveClearance = Math.max(
     options.gridClearance,
     input.minTraceToPadEdgeClearance ?? 0,
   );
   const maximumTraceMargin = maximumTraceWidth / 2 + effectiveClearance;
+  const maximumNominalTraceMargin =
+    maximumNominalTraceWidth / 2 + effectiveClearance;
   const boardEdgeMargin =
     (input.minBoardEdgeClearance ?? 0) + input.minTraceWidth / 2;
   const baseXCoordinates = [
@@ -903,12 +922,15 @@ const buildBiscuitBoardHypergraph = (
       // bottom. The edge remains usable in either direction when escaping a
       // pad or congestion makes the preferred channel impractical.
       cost: distance * (followsPreferredDirection ? 1 : 1.5),
+      // Index nominal-width collisions as well as physical-width blockers so
+      // the rip-up solver can prefer expansion-safe paths without removing
+      // narrower fallback paths from the graph.
       blockingObstacleIndexes: getBlockingObstacleIndexes(
         input,
         from.layer,
         from,
         to,
-        maximumTraceMargin,
+        maximumNominalTraceMargin,
         options,
       ),
       conflictEdgeIds: [],

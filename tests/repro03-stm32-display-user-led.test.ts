@@ -2,7 +2,10 @@ import "bun-match-svg";
 import { expect, test } from "bun:test";
 import type { SimpleRouteJson } from "@tscircuit/core";
 import { getSvgFromGraphicsObject } from "graphics-debug";
-import { BiscuitBoardRoutingPipelineSolver } from "../lib";
+import {
+  BiscuitBoardRoutingPipelineSolver,
+  type PreparedBiscuitRoutingProblem,
+} from "../lib";
 import capturedInput from "../repros/fixtures/repro03-stm32-display-user-led.srj.json";
 
 const input = capturedInput as SimpleRouteJson;
@@ -35,7 +38,7 @@ const cropSvgToRUserLed = (svg: string) => {
   );
 };
 
-test("reproduces irregular routing around R_USER_LED on the STM32 display board", async () => {
+test("keeps expanded routing regular around R_USER_LED on the STM32 display board", async () => {
   expect(input.connections).toHaveLength(17);
   expect(input.obstacles).toHaveLength(119);
 
@@ -44,7 +47,38 @@ test("reproduces irregular routing around R_USER_LED on the STM32 display board"
 
   expect(solver.failed).toBe(false);
   expect(solver.solved).toBe(true);
-  expect(solver.getOutput()?.traces).toHaveLength(33);
+  const output = solver.getOutput()!;
+  expect(output.traces).toHaveLength(33);
+  const prepared = solver.getStageOutput<PreparedBiscuitRoutingProblem>(
+    "generate-hypergraph",
+  )!;
+  const userLedDemand = prepared.demands.find(
+    (demand) => demand.connectionName === "source_trace_32",
+  );
+  expect(userLedDemand).toMatchObject({ width: 0.25, nominalWidth: 0.3 });
+
+  const userLedTrace = output.traces.find(
+    (trace) => trace.connection_name === "source_trace_32",
+  )!;
+  const userLedWirePoints = userLedTrace.route.filter(
+    (point) => point.route_type === "wire",
+  );
+  expect(
+    userLedWirePoints.slice(0, -1).every((start, index) => {
+      const end = userLedWirePoints[index + 1]!;
+      const dx = Math.abs(end.x - start.x);
+      const dy = Math.abs(end.y - start.y);
+      return dx < 1e-7 || dy < 1e-7 || Math.abs(dx - dy) < 1e-7;
+    }),
+  ).toBe(true);
+  expect(
+    userLedWirePoints.filter(
+      (point) =>
+        Math.abs(point.x - R_USER_LED_CENTER.x) <= R_USER_LED_VIEWBOX_MARGIN &&
+        Math.abs(point.y - R_USER_LED_CENTER.y) <= R_USER_LED_VIEWBOX_MARGIN,
+    ).length,
+  ).toBeLessThanOrEqual(3);
+  expect(userLedWirePoints.every((point) => point.width === 0.3)).toBe(true);
 
   const margin = R_USER_LED_VIEWBOX_MARGIN;
   const graphics = solver.visualize();

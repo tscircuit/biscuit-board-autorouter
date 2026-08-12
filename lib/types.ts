@@ -102,7 +102,10 @@ export interface RouteDemand {
   targetNode: number;
   sourcePointId?: string;
   targetPointId?: string;
+  /** Physical copper width emitted before the optional expansion pass. */
   width: number;
+  /** Preferred width used to avoid static-obstacle necks when alternatives exist. */
+  nominalWidth?: number;
 }
 
 export interface PrefabricatedVia extends Point {

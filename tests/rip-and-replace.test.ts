@@ -210,3 +210,99 @@ test("indexes occupied conflict edges without requiring a shared node", () => {
     crossingEdgeId,
   ]);
 });
+
+test("prefers nominal pad clearance without blocking a physical-width fallback", () => {
+  const createPrepared = (includeDetour: boolean) => {
+    const prepared = generateBiscuitBoardHypergraph({
+      bounds: { minX: -3, minY: -2, maxX: 3, maxY: 2 },
+      layerCount: 1,
+      minTraceWidth: 0.1,
+      obstacles: [
+        {
+          type: "rect",
+          center: { x: 0, y: 0.4 },
+          width: 1,
+          height: 0.2,
+          layers: ["top"],
+          connectedTo: [],
+        },
+      ],
+      connections: [],
+    });
+    const makeNode = (nodeId: string, x: number, y: number): RoutingNode => ({
+      nodeId,
+      x,
+      y,
+      layer: "top",
+      kind: "grid",
+      terminalPointIds: [],
+      terminalConnectionNames: [],
+    });
+    prepared.nodes = [
+      makeNode("start", -2, 0),
+      makeNode("end", 2, 0),
+      makeNode("detour-start", -2, -1),
+      makeNode("detour-end", 2, -1),
+    ];
+    prepared.edges = [];
+    prepared.adjacency = Array.from(
+      { length: prepared.nodes.length },
+      () => [],
+    );
+    const addEdge = (
+      fromNode: number,
+      toNode: number,
+      blockingObstacleIndexes: number[] = [],
+    ) => {
+      const edgeId = prepared.edges.length;
+      const edge: RoutingEdge = {
+        edgeId,
+        key: `trace:${fromNode}:${toNode}`,
+        kind: "trace",
+        fromNode,
+        toNode,
+        cost: Math.hypot(
+          prepared.nodes[toNode]!.x - prepared.nodes[fromNode]!.x,
+          prepared.nodes[toNode]!.y - prepared.nodes[fromNode]!.y,
+        ),
+        blockingObstacleIndexes,
+        conflictEdgeIds: [],
+      };
+      prepared.edges.push(edge);
+      prepared.adjacency[fromNode]!.push({ edgeId, toNode });
+      prepared.adjacency[toNode]!.push({ edgeId, toNode: fromNode });
+    };
+    addEdge(0, 1, [0]);
+    if (includeDetour) {
+      addEdge(0, 2);
+      addEdge(2, 3);
+      addEdge(3, 1);
+    }
+    const demand: RouteDemand = {
+      routeId: "signal",
+      connectionName: "signal",
+      netId: "signal",
+      sourceNode: 0,
+      targetNode: 1,
+      width: 0.1,
+      nominalWidth: 0.3,
+    };
+    prepared.demands = [demand];
+    prepared.demandById = new Map([[demand.routeId, demand]]);
+    return prepared;
+  };
+
+  const preferredSolver = new RipUpRubberBandSolver(createPrepared(true));
+  preferredSolver.solve();
+  expect(preferredSolver.failed).toBe(false);
+  expect(preferredSolver.committedRoutes.get("signal")!.nodePath).toEqual([
+    0, 2, 3, 1,
+  ]);
+
+  const fallbackSolver = new RipUpRubberBandSolver(createPrepared(false));
+  fallbackSolver.solve();
+  expect(fallbackSolver.failed).toBe(false);
+  expect(fallbackSolver.committedRoutes.get("signal")!.nodePath).toEqual([
+    0, 1,
+  ]);
+});

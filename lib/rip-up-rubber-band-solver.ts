@@ -164,6 +164,10 @@ const deterministicOrderKey = (value: string, pass: number) => {
   return hash;
 };
 
+// Prefer enough room for the requested final width around immovable pads,
+// while keeping the physical-width route available as a congestion fallback.
+const NOMINAL_OBSTACLE_PENALTY_MULTIPLIER = 10;
+
 export class RipUpRubberBandSolver extends BaseSolver {
   private readonly committed = new Map<string, RoutedConnection>();
   private readonly pending: RouteDemand[];
@@ -218,6 +222,10 @@ export class RipUpRubberBandSolver extends BaseSolver {
     Float64Array
   >();
   private readonly geometryPenaltyByDemand = new WeakMap<
+    RouteDemand,
+    Float64Array
+  >();
+  private readonly nominalObstaclePenaltyByDemand = new WeakMap<
     RouteDemand,
     Float64Array
   >();
@@ -887,6 +895,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
         parent.graphNode,
         toNode,
       ) +
+      this.getNominalObstaclePenaltyCached(search.demand, edgeId) +
       newlyBlockedRouteCount * search.congestionCost +
       foreignOwners.length * this.prepared.options.crossingCost;
     const visitedPreferredLayer =
@@ -1362,6 +1371,14 @@ export class RipUpRubberBandSolver extends BaseSolver {
   }
 
   private computeEdgeAllowsDemand(edge: RoutingEdge, demand: RouteDemand) {
+    return this.computeEdgeAllowsDemandAtWidth(edge, demand, demand.width);
+  }
+
+  private computeEdgeAllowsDemandAtWidth(
+    edge: RoutingEdge,
+    demand: RouteDemand,
+    width: number,
+  ) {
     if (edge.kind === "fixed_via_transition") return true;
     if (
       edge.restrictedToConnectionName !== undefined &&
@@ -1393,11 +1410,11 @@ export class RipUpRubberBandSolver extends BaseSolver {
           to,
           obstacleBounds(
             obstacle,
-            demand.width / 2 + clearance,
+            width / 2 + clearance,
             shouldRespectObstacleRotationInGraph(
               this.prepared.input,
               obstacle,
-              demand.width / 2 + clearance,
+              width / 2 + clearance,
               this.prepared.exactRotatedObstacleIndexes.includes(
                 obstacleIndex,
               ) || this.prepared.options.respectObstacleRotationInGraph,
@@ -1436,6 +1453,26 @@ export class RipUpRubberBandSolver extends BaseSolver {
       return false;
     }
     return true;
+  }
+
+  private getNominalObstaclePenaltyCached(demand: RouteDemand, edgeId: number) {
+    const nominalWidth = demand.nominalWidth ?? demand.width;
+    if (nominalWidth <= demand.width + 1e-7) return 0;
+    let cache = this.nominalObstaclePenaltyByDemand.get(demand);
+    if (!cache) {
+      cache = new Float64Array(this.prepared.edges.length).fill(Number.NaN);
+      this.nominalObstaclePenaltyByDemand.set(demand, cache);
+    }
+    let penalty = cache[edgeId]!;
+    if (!Number.isNaN(penalty)) return penalty;
+    const edge = this.prepared.edges[edgeId]!;
+    penalty = this.computeEdgeAllowsDemandAtWidth(edge, demand, nominalWidth)
+      ? 0
+      : edge.cost *
+        this.prepared.options.historyIncrement *
+        NOMINAL_OBSTACLE_PENALTY_MULTIPLIER;
+    cache[edgeId] = penalty;
+    return penalty;
   }
 
   private getConflictDistances(edge: Extract<RoutingEdge, { kind: "trace" }>) {
