@@ -146,6 +146,7 @@ test("beautifies the solved BiscuitBoard RP2040 repro02 SVG", async () => {
   expect(beautifier.failed).toBe(false);
   const beautified = beautifier.getOutput()!;
   expect(beautified.traces).not.toEqual(output!.traces);
+  expect(beautified.stats.sameNetConsolidationCount).toBeGreaterThan(0);
   expect(beautified.stats.fortyFiveDegreeChamferCount).toBeGreaterThan(0);
   expect(getTraceClearanceViolations(problem, beautified)).toEqual([]);
 
