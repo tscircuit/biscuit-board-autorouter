@@ -3,7 +3,9 @@ import { BaseSolver } from "@tscircuit/solver-utils";
 import type { GraphicsObject } from "graphics-debug";
 import {
   netColor,
+  obstacleBounds,
   pointsEqual,
+  segmentsIntersect,
   visualizeSimpleRouteJsonInput,
 } from "./geometry";
 import {
@@ -15,6 +17,7 @@ import {
 } from "./post-process-biscuit-board-traces-solver";
 import type {
   BiscuitBoardRoutingSolution,
+  Point,
   PreparedBiscuitRoutingProblem,
 } from "./types";
 
@@ -52,7 +55,21 @@ const wirePathLength = (points: WirePoint[]) =>
     );
 
 const getWireSegments = (trace: SimplifiedPcbTrace) => {
-  const segments: Array<{ start: WirePoint; end: WirePoint }> = [];
+  return getIndexedWireSegments(trace).map(({ start, end }) => ({
+    start,
+    end,
+  }));
+};
+
+interface IndexedWireSegment {
+  start: WirePoint;
+  end: WirePoint;
+  startRouteIndex: number;
+  endRouteIndex: number;
+}
+
+const getIndexedWireSegments = (trace: SimplifiedPcbTrace) => {
+  const segments: IndexedWireSegment[] = [];
   for (let index = 1; index < trace.route.length; index++) {
     const start = trace.route[index - 1]!;
     const end = trace.route[index]!;
@@ -62,7 +79,12 @@ const getWireSegments = (trace: SimplifiedPcbTrace) => {
       start.layer === end.layer &&
       !pointsEqual(start, end)
     ) {
-      segments.push({ start, end });
+      segments.push({
+        start,
+        end,
+        startRouteIndex: index - 1,
+        endRouteIndex: index,
+      });
     }
   }
   return segments;
@@ -112,10 +134,263 @@ interface ConsolidationCandidate {
   lengthReduction: number;
 }
 
+const chooseBetterConsolidationCandidate = (
+  current: ConsolidationCandidate | null,
+  candidate: ConsolidationCandidate,
+) =>
+  !current ||
+  candidate.overlapLength > current.overlapLength + EPSILON ||
+  (Math.abs(candidate.overlapLength - current.overlapLength) <= EPSILON &&
+    candidate.lengthReduction > current.lengthReduction + EPSILON)
+    ? candidate
+    : current;
+
+const cross = (first: Point, second: Point) =>
+  first.x * second.y - first.y * second.x;
+
+const subtract = (first: Point, second: Point): Point => ({
+  x: first.x - second.x,
+  y: first.y - second.y,
+});
+
+const dot = (first: Point, second: Point) =>
+  first.x * second.x + first.y * second.y;
+
+const pointIsInRect = (
+  point: Point,
+  rect: { minX: number; minY: number; maxX: number; maxY: number },
+) =>
+  point.x >= rect.minX - EPSILON &&
+  point.x <= rect.maxX + EPSILON &&
+  point.y >= rect.minY - EPSILON &&
+  point.y <= rect.maxY + EPSILON;
+
+const pointIsInConvexPolygon = (point: Point, polygon: Point[]) => {
+  let hasPositiveCross = false;
+  let hasNegativeCross = false;
+  for (let index = 0; index < polygon.length; index++) {
+    const start = polygon[index]!;
+    const end = polygon[(index + 1) % polygon.length]!;
+    const side = cross(subtract(end, start), subtract(point, start));
+    if (side > EPSILON) hasPositiveCross = true;
+    if (side < -EPSILON) hasNegativeCross = true;
+    if (hasPositiveCross && hasNegativeCross) return false;
+  }
+  return true;
+};
+
+const polygonEdges = (polygon: Point[]) =>
+  polygon.map((start, index) => ({
+    start,
+    end: polygon[(index + 1) % polygon.length]!,
+  }));
+
+const corridorIntersectsRect = (
+  corridor: Point[],
+  rect: { minX: number; minY: number; maxX: number; maxY: number },
+) => {
+  const rectPoints = [
+    { x: rect.minX, y: rect.minY },
+    { x: rect.maxX, y: rect.minY },
+    { x: rect.maxX, y: rect.maxY },
+    { x: rect.minX, y: rect.maxY },
+  ];
+  if (corridor.some((point) => pointIsInRect(point, rect))) return true;
+  if (rectPoints.some((point) => pointIsInConvexPolygon(point, corridor))) {
+    return true;
+  }
+  return polygonEdges(corridor).some((corridorEdge) =>
+    polygonEdges(rectPoints).some((rectEdge) =>
+      segmentsIntersect(
+        corridorEdge.start,
+        corridorEdge.end,
+        rectEdge.start,
+        rectEdge.end,
+      ),
+    ),
+  );
+};
+
+const segmentIntersectsCorridor = (
+  start: Point,
+  end: Point,
+  corridor: Point[],
+) =>
+  pointIsInConvexPolygon(start, corridor) ||
+  pointIsInConvexPolygon(end, corridor) ||
+  polygonEdges(corridor).some((edge) =>
+    segmentsIntersect(start, end, edge.start, edge.end),
+  );
+
 /**
- * Reuses a same-net trace between junctions whenever doing so does not make the
- * route longer. This turns adjacent duplicate branches back into one visible
- * copper path after clearance cleanup has moved them independently.
+ * A parallel span is only moved when the complete strip between the two
+ * centerlines is empty. Final trace clearance is checked separately after the
+ * replacement route is assembled.
+ */
+const parallelCorridorIsEmpty = (
+  prepared: PreparedBiscuitRoutingProblem,
+  solution: BiscuitBoardRoutingSolution,
+  traceIndex: number,
+  layer: string,
+  corridor: Point[],
+) => {
+  for (const obstacle of prepared.input.obstacles) {
+    if (
+      obstacle.isCopperPour ||
+      !obstacle.layers.includes(layer) ||
+      !corridorIntersectsRect(corridor, obstacleBounds(obstacle))
+    ) {
+      continue;
+    }
+    return false;
+  }
+
+  const netId = solution.routes[traceIndex]!.netId;
+  for (const [otherIndex, otherTrace] of solution.traces.entries()) {
+    if (
+      otherIndex === traceIndex ||
+      solution.routes[otherIndex]!.netId === netId
+    ) {
+      continue;
+    }
+    for (const segment of getWireSegments(otherTrace)) {
+      if (
+        segment.start.layer === layer &&
+        segmentIntersectsCorridor(segment.start, segment.end, corridor)
+      ) {
+        return false;
+      }
+    }
+  }
+  return true;
+};
+
+const createWirePoint = (template: WirePoint, point: Point): WirePoint => ({
+  ...template,
+  ...point,
+});
+
+/**
+ * Pulls an offset parallel segment onto an existing same-net segment for the
+ * common projected run. The original segment endpoints remain in place and
+ * become the approach/departure points for the shared copper.
+ */
+const createParallelConsolidationCandidate = (
+  prepared: PreparedBiscuitRoutingProblem,
+  solution: BiscuitBoardRoutingSolution,
+  traceIndex: number,
+  route: SimplifiedPcbTrace["route"],
+  segment: IndexedWireSegment,
+  anchor: IndexedWireSegment,
+  clearance: number,
+): ConsolidationCandidate | null => {
+  if (segment.start.layer !== anchor.start.layer) return null;
+  const anchorVector = subtract(anchor.end, anchor.start);
+  const segmentVector = subtract(segment.end, segment.start);
+  const anchorLength = Math.hypot(anchorVector.x, anchorVector.y);
+  const segmentLength = Math.hypot(segmentVector.x, segmentVector.y);
+  if (anchorLength <= EPSILON || segmentLength <= EPSILON) return null;
+  if (
+    Math.abs(cross(anchorVector, segmentVector)) >
+    EPSILON * anchorLength * segmentLength
+  ) {
+    return null;
+  }
+
+  const direction = {
+    x: anchorVector.x / anchorLength,
+    y: anchorVector.y / anchorLength,
+  };
+  const segmentStartProjection = dot(
+    subtract(segment.start, anchor.start),
+    direction,
+  );
+  const segmentEndProjection = dot(
+    subtract(segment.end, anchor.start),
+    direction,
+  );
+  const overlapStart = Math.max(
+    0,
+    Math.min(segmentStartProjection, segmentEndProjection),
+  );
+  const overlapEnd = Math.min(
+    anchorLength,
+    Math.max(segmentStartProjection, segmentEndProjection),
+  );
+  const overlapLength = overlapEnd - overlapStart;
+  const offset = Math.abs(
+    cross(direction, subtract(segment.start, anchor.start)),
+  );
+  // Two clearance-safe 45-degree approaches consume one offset at either end.
+  if (offset <= EPSILON || overlapLength <= 2 * offset + EPSILON) {
+    return null;
+  }
+
+  const followsAnchorDirection = segmentEndProjection > segmentStartProjection;
+  const entryProjection = followsAnchorDirection ? overlapStart : overlapEnd;
+  const exitProjection = followsAnchorDirection ? overlapEnd : overlapStart;
+  const pointOnAnchor = (projection: number): Point => ({
+    x: anchor.start.x + direction.x * projection,
+    y: anchor.start.y + direction.y * projection,
+  });
+  const pointOnSegment = (projection: number): Point => ({
+    x: segment.start.x + direction.x * (projection - segmentStartProjection),
+    y: segment.start.y + direction.y * (projection - segmentStartProjection),
+  });
+  const candidateEntry = pointOnSegment(entryProjection);
+  const candidateExit = pointOnSegment(exitProjection);
+  const anchorEntry = pointOnAnchor(entryProjection);
+  const anchorExit = pointOnAnchor(exitProjection);
+  const corridor = [candidateEntry, candidateExit, anchorExit, anchorEntry];
+  if (
+    !parallelCorridorIsEmpty(
+      prepared,
+      solution,
+      traceIndex,
+      segment.start.layer,
+      corridor,
+    )
+  ) {
+    return null;
+  }
+
+  const replacement = [
+    segment.start,
+    createWirePoint(segment.start, candidateEntry),
+    createWirePoint(segment.start, anchorEntry),
+    createWirePoint(segment.start, anchorExit),
+    createWirePoint(segment.start, candidateExit),
+    segment.end,
+  ];
+  const candidateRoute = removeConsecutiveDuplicateWirePoints([
+    ...route.slice(0, segment.startRouteIndex),
+    ...replacement,
+    ...route.slice(segment.endRouteIndex + 1),
+  ]);
+  if (routeGeometryEqual(route, candidateRoute)) return null;
+  if (
+    !traceRouteHasClearance(
+      prepared,
+      solution,
+      traceIndex,
+      candidateRoute,
+      clearance,
+    )
+  ) {
+    return null;
+  }
+
+  return {
+    route: candidateRoute,
+    overlapLength,
+    lengthReduction: -2 * offset,
+  };
+};
+
+/**
+ * Reuses same-net copper between shared junctions and pulls unobstructed
+ * parallel spans onto one centerline. This turns adjacent branches back into
+ * one visible copper path after clearance cleanup has moved them independently.
  */
 const consolidateSameNetTraces = (
   prepared: PreparedBiscuitRoutingProblem,
@@ -240,14 +515,26 @@ const consolidateSameNetTraces = (
               overlapLength: anchorLength,
               lengthReduction: candidateLength - anchorLength,
             };
-            if (
-              !best ||
-              candidate.overlapLength > best.overlapLength + EPSILON ||
-              (Math.abs(candidate.overlapLength - best.overlapLength) <=
-                EPSILON &&
-                candidate.lengthReduction > best.lengthReduction + EPSILON)
-            ) {
-              best = candidate;
+            best = chooseBetterConsolidationCandidate(best, candidate);
+          }
+        }
+
+        const workingSolution = { ...solution, traces };
+        for (const segment of getIndexedWireSegments(traces[traceIndex]!)) {
+          for (const anchorSegment of getIndexedWireSegments(
+            traces[anchorIndex]!,
+          )) {
+            const candidate = createParallelConsolidationCandidate(
+              prepared,
+              workingSolution,
+              traceIndex,
+              route,
+              segment,
+              anchorSegment,
+              clearance,
+            );
+            if (candidate) {
+              best = chooseBetterConsolidationCandidate(best, candidate);
             }
           }
         }

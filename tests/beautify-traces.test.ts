@@ -54,6 +54,45 @@ const createSolution = (
   return { prepared, solution };
 };
 
+const getHorizontalSegments = (trace: SimplifiedPcbTrace) =>
+  trace.route.slice(1).flatMap((end, index) => {
+    const start = trace.route[index]!;
+    if (
+      start.route_type !== "wire" ||
+      end.route_type !== "wire" ||
+      start.layer !== end.layer ||
+      Math.abs(start.y - end.y) > 1e-7
+    ) {
+      return [];
+    }
+    return [
+      {
+        y: start.y,
+        minX: Math.min(start.x, end.x),
+        maxX: Math.max(start.x, end.x),
+      },
+    ];
+  });
+
+const getLongestSharedHorizontalRun = (
+  first: SimplifiedPcbTrace,
+  second: SimplifiedPcbTrace,
+) =>
+  Math.max(
+    0,
+    ...getHorizontalSegments(first).flatMap((firstSegment) =>
+      getHorizontalSegments(second).map((secondSegment) =>
+        Math.abs(firstSegment.y - secondSegment.y) <= 1e-7
+          ? Math.max(
+              0,
+              Math.min(firstSegment.maxX, secondSegment.maxX) -
+                Math.max(firstSegment.minX, secondSegment.minX),
+            )
+          : 0,
+      ),
+    ),
+  );
+
 test("beautification takes the largest available 45-degree corner", () => {
   const input: SimpleRouteJson = {
     bounds: { minX: 0, minY: 0, maxX: 10, maxY: 10 },
@@ -197,3 +236,109 @@ test("beautification consolidates same-net spans onto shared copper", () => {
   expect(geometry[1]).toEqual(geometry[0]);
   expect(beautified.stats.sameNetConsolidationCount).toBeGreaterThan(0);
 });
+
+const createParallelSameNetCase = (
+  blocker: "none" | "obstacle" | "foreign-trace",
+) => {
+  const obstacles: SimpleRouteJson["obstacles"] =
+    blocker === "obstacle"
+      ? [
+          {
+            type: "rect",
+            center: { x: 5, y: 4 },
+            width: 1,
+            height: 0.2,
+            layers: ["top"],
+            connectedTo: [],
+          },
+        ]
+      : [];
+  const input: SimpleRouteJson = {
+    bounds: { minX: 0, minY: 0, maxX: 10, maxY: 8 },
+    layerCount: 1,
+    minTraceWidth: 0.1,
+    obstacles,
+    connections: [
+      {
+        name: "outer-ground",
+        netConnectionName: "GND",
+        pointsToConnect: [
+          { x: 1, y: 3, layer: "top", pointId: "outer-left" },
+          { x: 9, y: 3, layer: "top", pointId: "outer-right" },
+        ],
+      },
+      {
+        name: "inner-ground",
+        netConnectionName: "GND",
+        pointsToConnect: [
+          { x: 2, y: 5, layer: "top", pointId: "inner-left" },
+          { x: 8, y: 5, layer: "top", pointId: "inner-right" },
+        ],
+      },
+      ...(blocker === "foreign-trace"
+        ? [
+            {
+              name: "signal",
+              pointsToConnect: [
+                { x: 3, y: 4, layer: "top", pointId: "signal-left" },
+                { x: 7, y: 4, layer: "top", pointId: "signal-right" },
+              ],
+            },
+          ]
+        : []),
+    ],
+  };
+  return createSolution(input, [
+    [
+      { x: 1, y: 3 },
+      { x: 9, y: 3 },
+    ],
+    [
+      { x: 2, y: 5 },
+      { x: 8, y: 5 },
+    ],
+    ...(blocker === "foreign-trace"
+      ? [
+          [
+            { x: 3, y: 4 },
+            { x: 7, y: 4 },
+          ],
+        ]
+      : []),
+  ]);
+};
+
+test("beautification combines unobstructed parallel same-net spans", () => {
+  const { prepared, solution } = createParallelSameNetCase("none");
+
+  const beautified = beautifyBiscuitBoardTraces(prepared, solution);
+
+  expect(
+    getLongestSharedHorizontalRun(beautified.traces[0]!, beautified.traces[1]!),
+  ).toBeGreaterThan(3.9);
+  expect(beautified.stats.sameNetConsolidationCount).toBeGreaterThan(0);
+  for (const [traceIndex, trace] of beautified.traces.entries()) {
+    expect(trace.route[0]).toEqual(solution.traces[traceIndex]!.route[0]);
+    expect(trace.route.at(-1)).toEqual(
+      solution.traces[traceIndex]!.route.at(-1),
+    );
+  }
+});
+
+for (const [blocker, blockerLabel] of [
+  ["obstacle", "an obstacle"],
+  ["foreign-trace", "a foreign trace"],
+] as const) {
+  test(`beautification leaves parallel same-net spans apart when ${blockerLabel} is between them`, () => {
+    const { prepared, solution } = createParallelSameNetCase(blocker);
+    const beautified = beautifyBiscuitBoardTraces(prepared, solution);
+
+    expect(
+      getLongestSharedHorizontalRun(
+        beautified.traces[0]!,
+        beautified.traces[1]!,
+      ),
+    ).toBe(0);
+    expect(beautified.stats.sameNetConsolidationCount).toBe(0);
+  });
+}
