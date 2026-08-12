@@ -9,6 +9,9 @@ import type {
 } from "./types";
 
 const EPSILON = 1e-7;
+// Extra room needed so equivalent route/Circuit JSON representations do not
+// turn an exactly tangent nominal-width path into an expansion repair.
+export const EXPANSION_CLEARANCE_GUARD = 0.04;
 
 export const pointsEqual = (a: Point, b: Point, epsilon = EPSILON) =>
   Math.abs(a.x - b.x) <= epsilon && Math.abs(a.y - b.y) <= epsilon;

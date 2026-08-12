@@ -7,6 +7,7 @@ import {
 import { BaseSolver } from "@tscircuit/solver-utils";
 import type { GraphicsObject } from "graphics-debug";
 import { assertOnlyPrefabricatedVias } from "./build-biscuit-board-traces-solver";
+import { EXPANSION_CLEARANCE_GUARD } from "./geometry";
 import { getEffectiveTraceClearance } from "./post-process-biscuit-board-traces-solver";
 import type {
   BiscuitBoardRoutingSolution,
@@ -20,7 +21,6 @@ const WIDTH_EPSILON = 1e-7;
 // The route input and Circuit JSON use slightly different representations for
 // short diagonal width transitions at pads. Use this only for the final width
 // fit so it does not make the expander search a globally over-constrained board.
-const EXPANSION_CLEARANCE_GUARD = 0.04;
 const FINAL_STATIC_CLEARANCE_GUARD = 0.025;
 
 const getExpansionClearance = (

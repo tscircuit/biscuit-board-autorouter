@@ -1,6 +1,7 @@
 import { BaseSolver } from "@tscircuit/solver-utils";
 import type { GraphicsObject } from "graphics-debug";
 import {
+  EXPANSION_CLEARANCE_GUARD,
   getTerminalEscapeMinimumRun,
   obstacleBounds,
   pointDistance,
@@ -381,6 +382,7 @@ const buildDemands = (
         }
       }
       const target = remaining.splice(bestRemainingIndex, 1)[0]!;
+      const width = connection.width ?? input.minTraceWidth;
       demands.push({
         routeId: `${connection.name}:${branchIndex++}`,
         connectionName: connection.name,
@@ -392,7 +394,11 @@ const buildDemands = (
         targetNode: target.node!,
         sourcePointId: bestConnected.point.pointId,
         targetPointId: target.point.pointId,
-        width: connection.width ?? input.minTraceWidth,
+        width,
+        nominalWidth: Math.max(
+          width,
+          connection.nominalTraceWidth ?? input.nominalTraceWidth ?? width,
+        ),
       });
       connected.push(target);
     }
@@ -518,11 +524,25 @@ const buildBiscuitBoardHypergraph = (
       (connection) => connection.width ?? input.minTraceWidth,
     ),
   );
+  const maximumNominalTraceWidth = Math.max(
+    maximumTraceWidth,
+    ...input.connections.map((connection) =>
+      Math.max(
+        connection.width ?? input.minTraceWidth,
+        connection.nominalTraceWidth ??
+          input.nominalTraceWidth ??
+          connection.width ??
+          input.minTraceWidth,
+      ),
+    ),
+  );
   const effectiveClearance = Math.max(
     options.gridClearance,
     input.minTraceToPadEdgeClearance ?? 0,
   );
   const maximumTraceMargin = maximumTraceWidth / 2 + effectiveClearance;
+  const maximumNominalTraceMargin =
+    maximumNominalTraceWidth / 2 + effectiveClearance;
   const boardEdgeMargin =
     (input.minBoardEdgeClearance ?? 0) + input.minTraceWidth / 2;
   const baseXCoordinates = [
@@ -626,24 +646,36 @@ const buildBiscuitBoardHypergraph = (
         if (obstacle.isCopperPour || !matchesConnection) {
           continue;
         }
-        const bounds = obstacleBounds(
-          obstacle,
-          maximumTraceMargin,
-          graphUsesRotatedObstacleBounds(
-            input,
+        const escapeBounds = [maximumTraceMargin];
+        if (maximumNominalTraceMargin > maximumTraceMargin + 1e-7) {
+          // Keep the physical-width boundary as a fallback, while adding a
+          // second corridor where a trace can turn without requiring the
+          // expansion pass to repair its clearance around neighboring pads.
+          escapeBounds.push(
+            maximumNominalTraceMargin + EXPANSION_CLEARANCE_GUARD,
+          );
+        }
+        const terminalEscapeBounds = escapeBounds.map((margin) =>
+          obstacleBounds(
             obstacle,
-            obstacleIndex,
-            maximumTraceMargin,
-            options,
+            margin,
+            graphUsesRotatedObstacleBounds(
+              input,
+              obstacle,
+              obstacleIndex,
+              margin,
+              options,
+            ),
           ),
         );
-        const escapePoints = [
-          { x: bounds.minX, y: point.y },
-          { x: bounds.maxX, y: point.y },
-          { x: point.x, y: bounds.minY },
-          { x: point.x, y: bounds.maxY },
-        ];
-        specialPoints.push(...escapePoints);
+        for (const bounds of terminalEscapeBounds) {
+          specialPoints.push(
+            { x: bounds.minX, y: point.y },
+            { x: bounds.maxX, y: point.y },
+            { x: point.x, y: bounds.minY },
+            { x: point.x, y: bounds.maxY },
+          );
+        }
         const terminalLayers = point.layers ?? [point.layer];
         if (matchesTerminal && connection.pointsToConnect.length === 2) {
           const other = connection.pointsToConnect.find(
@@ -721,12 +753,14 @@ const buildBiscuitBoardHypergraph = (
             }
           }
         };
-        if (obstacle.width >= obstacle.height) {
-          addDiagonalLandings(bounds.minX, "x");
-          addDiagonalLandings(bounds.maxX, "x");
-        } else {
-          addDiagonalLandings(bounds.minY, "y");
-          addDiagonalLandings(bounds.maxY, "y");
+        for (const bounds of terminalEscapeBounds) {
+          if (obstacle.width >= obstacle.height) {
+            addDiagonalLandings(bounds.minX, "x");
+            addDiagonalLandings(bounds.maxX, "x");
+          } else {
+            addDiagonalLandings(bounds.minY, "y");
+            addDiagonalLandings(bounds.maxY, "y");
+          }
         }
       }
     }
@@ -903,12 +937,15 @@ const buildBiscuitBoardHypergraph = (
       // bottom. The edge remains usable in either direction when escaping a
       // pad or congestion makes the preferred channel impractical.
       cost: distance * (followsPreferredDirection ? 1 : 1.5),
+      // Index nominal-width collisions as well as physical-width blockers so
+      // the rip-up solver can prefer expansion-safe paths without removing
+      // narrower fallback paths from the graph.
       blockingObstacleIndexes: getBlockingObstacleIndexes(
         input,
         from.layer,
         from,
         to,
-        maximumTraceMargin,
+        maximumNominalTraceMargin,
         options,
       ),
       conflictEdgeIds: [],
