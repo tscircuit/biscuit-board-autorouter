@@ -82,6 +82,11 @@ problem-specific tuning. Run `./benchmark.sh --list` to see case IDs or
 three-minute timeout so dense inputs such as RP2040 can make meaningful
 progress without blocking the suite indefinitely.
 
+The default route order is selected from problem structure: boards with at
+least 64 routing demands and one or more `source_trace_*` signals route signals
+longest-first, while smaller boards retain input order. Supplying `routeOrder`
+still overrides this selection.
+
 Tests include SVG matching, forced layer transitions, the
 no-prefabricated-via failure case, negotiated rip-and-replace, and the complete
 STM32 real-project repro.

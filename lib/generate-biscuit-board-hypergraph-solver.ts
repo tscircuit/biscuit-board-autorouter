@@ -55,10 +55,37 @@ type HypergraphGenerationOptions = NormalizedBiscuitBoardAutorouterOptions & {
   exactRotatedObstacleIndexes: ReadonlySet<number>;
 };
 
+const DENSE_BOARD_DEMAND_THRESHOLD = 64;
+
+export const selectDefaultRouteOrder = (
+  input: Pick<SimpleRouteJson, "connections">,
+): NormalizedBiscuitBoardAutorouterOptions["routeOrder"] => {
+  let demandCount = 0;
+  let signalDemandCount = 0;
+  for (const connection of input.connections) {
+    const connectionDemandCount = Math.max(
+      0,
+      connection.pointsToConnect.length - 1,
+    );
+    demandCount += connectionDemandCount;
+    if (connection.name.startsWith("source_trace_")) {
+      signalDemandCount += connectionDemandCount;
+    }
+  }
+  return demandCount >= DENSE_BOARD_DEMAND_THRESHOLD && signalDemandCount > 0
+    ? "signal_longest_first"
+    : "input";
+};
+
 const normalizeOptions = (
+  input: SimpleRouteJson,
   options: BiscuitBoardAutorouterOptions = {},
 ): NormalizedBiscuitBoardAutorouterOptions => {
-  const normalized = { ...DEFAULT_OPTIONS, ...options };
+  const normalized = {
+    ...DEFAULT_OPTIONS,
+    ...options,
+    routeOrder: options.routeOrder ?? selectDefaultRouteOrder(input),
+  };
   for (const key of [
     "gridPitch",
     "viaTransitionCost",
@@ -511,7 +538,7 @@ const buildBiscuitBoardHypergraph = (
   ) {
     throw new Error("routing bounds must have positive width and height");
   }
-  const normalizedOptions = normalizeOptions(rawOptions);
+  const normalizedOptions = normalizeOptions(input, rawOptions);
   const options: HypergraphGenerationOptions = {
     ...normalizedOptions,
     exactRotatedObstacleIndexes,

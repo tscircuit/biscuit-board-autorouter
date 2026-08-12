@@ -10,6 +10,10 @@ export interface RectBounds {
 }
 
 export interface BiscuitBoardAutorouterOptions {
+  /**
+   * Demand ordering override. When omitted, dense boards with signal traces
+   * route signals longest-first; smaller boards preserve input order.
+   */
   routeOrder?:
     | "longest_first"
     | "shortest_first"

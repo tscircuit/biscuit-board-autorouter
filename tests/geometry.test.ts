@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import type { SimpleRouteJson } from "@tscircuit/core";
 import { generateBiscuitBoardHypergraph, RipUpRubberBandSolver } from "../lib";
+import { segmentToObstacleDistance } from "../lib/geometry";
 import { obstacleBounds } from "../lib/geometry";
 
 test("obstacle bounds include rotation and clearance", () => {
@@ -18,6 +19,18 @@ test("obstacle bounds include rotation and clearance", () => {
   expect(bounds.maxX).toBeCloseTo(11.05);
   expect(bounds.minY).toBeCloseTo(-5.75);
   expect(bounds.maxY).toBeCloseTo(-4.25);
+});
+
+test("rectangle corner clearance uses Euclidean distance", () => {
+  const obstacle = {
+    center: { x: 1, y: 1 },
+    width: 1,
+    height: 1,
+  };
+
+  expect(
+    segmentToObstacleDistance({ x: 0, y: 0 }, { x: 0.25, y: 0.25 }, obstacle),
+  ).toBeCloseTo(Math.SQRT1_2 / 2, 8);
 });
 
 test("obstacle bounds can preserve the routing graph's unrotated envelope", () => {
