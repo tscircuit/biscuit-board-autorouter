@@ -27,12 +27,7 @@ IDs and connectivity metadata.
   assignable prefabricated vias
 
 Open `repros/repro02.page.tsx` in Cosmos for the `GenericSolverDebugger`, or
-run `./benchmark.sh` for the headless regression benchmark. The benchmark
-exits successfully only when every original demand is electrically connected,
-all emitted traces route with no manufactured vias, and no clearance
-violations remain. It currently exits nonzero because negotiated routing still
-cycles on this dense board; use `--debug` to include its conflict and
-connectivity state in the JSON report.
+run `./benchmark.sh --case=rp2040` for this headless benchmark case.
 
 ## Repro 03 · STM32 display board R_USER_LED traces
 
@@ -62,6 +57,10 @@ trace geometry.
 The SVG regression test runs the complete routing pipeline, then snapshots the
 combined BTN1/BTN2 center bounds with a 5 mm margin on every side. The crop
 keeps both buttons and the irregular traces between them visible.
+
+Repro 04 contains the same complete Simple Route JSON input as Repro 03; only
+the visual regression crop differs. The benchmark therefore runs that routing
+problem once as `stm32-display` instead of double-counting it.
 
 ## Repro 05 · STM32 display redundant GND branch
 
@@ -94,3 +93,23 @@ same-net loop.
 The SVG regression test snapshots the complete local topology from `C_MCU`
 through `C_NRST` and `D_PWR` to the via. Its red overlay marks the redundant
 portion and its green overlay marks the portion still needed to reach the via.
+
+## Repro 06 · STM32 display BoosterPack
+
+- Source: `tscircuit/biscuit-boards` at
+  `8092271c9a6bf7d82f27630eed6e47497b534429`
+- Circuit: `examples/stm32c071-display-boosterpack.tsx`
+- Capture point: the normalized `SimpleRouteJson` passed to the BoosterPack
+  `BiscuitBoard` autorouter
+- Input: 15 merged connections, 157 obstacles, 2 layers, 34 routing demands,
+  and 51 assignable prefabricated vias
+
+## Headless benchmark suite
+
+`./benchmark.sh` runs Repros 01, 02, 03, and 06. Every case intentionally
+omits `routeOrder`, so the effective order comes from the autorouter default.
+The suite exits successfully only when every original demand is electrically
+connected, all emitted traces route with no manufactured vias, and no
+clearance violations remain. A failed or timed-out case does not prevent the
+remaining cases from running. Use `--debug` to include conflict and
+connectivity state in the JSON report.
