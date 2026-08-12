@@ -89,6 +89,22 @@ largest 45-degree cut that preserves the achieved clearance. Shared junctions
 remain fixed, and the completed solution is checked again before it is passed
 to the expander.
 
+## Same-net topology cleanup
+
+Beautified traces can cross or join earlier branches from the same electrical
+net, creating a copper cycle even though each demand was routed as a simple
+path. The topology-cleanup stage splits same-layer segments at crossings,
+T-junctions, and overlap endpoints, and includes prefabricated-via transitions
+as graph edges. It then grows a deterministic, acyclic subtree over the copper
+that is already present until every emitted trace attachment is connected.
+
+Only demands whose original path used a removed edge are rebuilt over that
+subtree. This preserves unaffected route geometry and Circuit JSON's
+endpoint-to-endpoint trace contract while eliminating redundant copper. No new
+segment or layer transition is introduced. The candidate is validated against
+the normal copper-clearance model and is discarded if sharing an existing path
+at the demand's width would reduce clearance below the configured minimum.
+
 ## Nominal-width expansion
 
 The final expansion stage deliberately separates routability from preferred

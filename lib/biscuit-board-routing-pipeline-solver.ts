@@ -10,6 +10,7 @@ import { BuildBiscuitBoardTracesSolver } from "./build-biscuit-board-traces-solv
 import { ExpandBiscuitBoardTracesSolver } from "./expand-biscuit-board-traces-solver";
 import { GenerateBiscuitBoardHypergraphSolver } from "./generate-biscuit-board-hypergraph-solver";
 import { PostProcessBiscuitBoardTracesSolver } from "./post-process-biscuit-board-traces-solver";
+import { PruneRedundantSameNetCopperSolver } from "./prune-redundant-same-net-copper-solver";
 import { RipUpRubberBandSolver } from "./rip-up-rubber-band-solver";
 import { visualizeSimpleRouteJsonInput } from "./geometry";
 import type {
@@ -88,8 +89,8 @@ export class BiscuitBoardRoutingPipelineSolver extends BasePipelineSolver<Simple
       },
     ),
     definePipelineStep(
-      "expand-traces",
-      ExpandBiscuitBoardTracesSolver,
+      "prune-redundant-same-net-copper",
+      PruneRedundantSameNetCopperSolver,
       (instance: BiscuitBoardRoutingPipelineSolver) => {
         const prepared = instance.getStageOutput<PreparedBiscuitRoutingProblem>(
           "generate-hypergraph",
@@ -98,6 +99,22 @@ export class BiscuitBoardRoutingPipelineSolver extends BasePipelineSolver<Simple
           instance.getStageOutput<BiscuitBoardRoutingSolution>(
             "beautify-traces",
           );
+        if (!prepared || !built) {
+          throw new Error("Same-net topology cleanup inputs are unavailable");
+        }
+        return [{ prepared, built }];
+      },
+    ),
+    definePipelineStep(
+      "expand-traces",
+      ExpandBiscuitBoardTracesSolver,
+      (instance: BiscuitBoardRoutingPipelineSolver) => {
+        const prepared = instance.getStageOutput<PreparedBiscuitRoutingProblem>(
+          "generate-hypergraph",
+        );
+        const built = instance.getStageOutput<BiscuitBoardRoutingSolution>(
+          "prune-redundant-same-net-copper",
+        );
         if (!prepared || !built) {
           throw new Error("Trace expansion inputs are unavailable");
         }

@@ -5,5 +5,6 @@ export * from "./build-biscuit-board-traces-solver";
 export * from "./expand-biscuit-board-traces-solver";
 export * from "./generate-biscuit-board-hypergraph-solver";
 export * from "./post-process-biscuit-board-traces-solver";
+export * from "./prune-redundant-same-net-copper-solver";
 export * from "./rip-up-rubber-band-solver";
 export * from "./types";

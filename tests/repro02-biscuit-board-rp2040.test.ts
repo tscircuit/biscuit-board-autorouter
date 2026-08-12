@@ -10,6 +10,7 @@ import {
   ExpandBiscuitBoardTracesSolver,
   fitExpandedTraceWidthsToClearance,
   PostProcessBiscuitBoardTracesSolver,
+  PruneRedundantSameNetCopperSolver,
   type BiscuitBoardRoutingSolution,
   type PreparedBiscuitRoutingProblem,
 } from "../lib";
@@ -73,6 +74,23 @@ const getBeautifier = () => {
   });
   beautifier.solve();
   return beautifier;
+};
+let topologyCleaner: PruneRedundantSameNetCopperSolver | undefined;
+const getTopologyCleaner = () => {
+  if (topologyCleaner) return topologyCleaner;
+  topologyCleaner = new PruneRedundantSameNetCopperSolver({
+    prepared: getPrepared(),
+    built: getBeautifier().getOutput()!,
+  });
+  topologyCleaner.solve();
+  return topologyCleaner;
+};
+
+const getWireEndpoints = (
+  trace: BiscuitBoardRoutingSolution["traces"][number],
+) => {
+  const wires = trace.route.filter((point) => point.route_type === "wire");
+  return [wires[0], wires.at(-1)];
 };
 
 test("preserves the exact BiscuitBoard RP2040 routing reproduction", () => {
@@ -149,6 +167,15 @@ test("beautifies the solved BiscuitBoard RP2040 repro02 SVG", async () => {
   expect(beautified.stats.sameNetConsolidationCount).toBeGreaterThan(0);
   expect(beautified.stats.fortyFiveDegreeChamferCount).toBeGreaterThan(0);
   expect(getTraceClearanceViolations(problem, beautified)).toEqual([]);
+
+  const cleaner = getTopologyCleaner();
+  expect(cleaner.failed).toBe(false);
+  const cleaned = cleaner.getOutput()!;
+  expect(cleaned.stats.sameNetCyclePruneCount).toBeGreaterThan(0);
+  expect(getTraceClearanceViolations(problem, cleaned)).toEqual([]);
+  expect(cleaned.traces.map(getWireEndpoints)).toEqual(
+    beautified.traces.map(getWireEndpoints),
+  );
 
   const beautificationGraphics = beautifier.visualize();
   expect(beautificationGraphics.rects?.length).toBeGreaterThan(0);
