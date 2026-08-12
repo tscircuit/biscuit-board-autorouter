@@ -163,6 +163,22 @@ test("beautifies the solved BiscuitBoard RP2040 repro02 SVG", async () => {
   expect(
     obstacleLabels.some((label) => label.includes("prefabricated via")),
   ).toBe(true);
+  const beautifiedLines = (beautificationGraphics.lines ?? []).filter((line) =>
+    line.label?.startsWith("beautified trace ·"),
+  );
+  expect(
+    beautifiedLines.some(
+      (line) =>
+        line.label?.endsWith("· bottom") &&
+        line.strokeDash?.[0] === 6 &&
+        line.strokeDash[1] === 4,
+    ),
+  ).toBe(true);
+  expect(
+    beautifiedLines.some(
+      (line) => line.label?.endsWith("· top") && line.strokeDash === undefined,
+    ),
+  ).toBe(true);
   const svg = getSvgFromGraphicsObject(beautificationGraphics, {
     backgroundColor: "white",
     svgWidth: 1200,
