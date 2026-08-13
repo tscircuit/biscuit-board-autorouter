@@ -12,21 +12,26 @@ import type {
 
 type RoutePoint = SimplifiedPcbTrace["route"][number];
 type WirePoint = Extract<RoutePoint, { route_type: "wire" }>;
+type CopperVertexId = string;
+type CopperEdgeId = string;
+type PrefabricatedViaId = string;
+type NetId = string;
+type LayerName = string;
 
 interface CopperVertex {
-  key: string;
+  key: CopperVertexId;
   x: number;
   y: number;
-  layer: string;
+  layer: LayerName;
 }
 
 interface CopperEdge {
-  key: string;
-  first: string;
-  second: string;
+  key: CopperEdgeId;
+  first: CopperVertexId;
+  second: CopperVertexId;
   cost: number;
   kind: "wire" | "fixed_via";
-  prefabViaId?: string;
+  prefabViaId?: PrefabricatedViaId;
 }
 
 interface RawWireSegment {
@@ -37,10 +42,10 @@ interface RawWireSegment {
 }
 
 interface CopperGraph {
-  vertices: Map<string, CopperVertex>;
-  edges: Map<string, CopperEdge>;
-  adjacency: Map<string, CopperEdge[]>;
-  edgeKeysByTrace: Array<Set<string>>;
+  vertices: Map<CopperVertexId, CopperVertex>;
+  edges: Map<CopperEdgeId, CopperEdge>;
+  adjacency: Map<CopperVertexId, CopperEdge[]>;
+  edgeKeysByTrace: Array<Set<CopperEdgeId>>;
 }
 
 const EPSILON = 1e-7;
@@ -49,10 +54,18 @@ const KEY_PRECISION = 7;
 const coordinateKey = (value: number) =>
   Math.abs(value) <= EPSILON ? "0" : value.toFixed(KEY_PRECISION);
 
-const vertexKey = (point: { x: number; y: number; layer: string }) =>
+const vertexKey = (point: {
+  x: number;
+  y: number;
+  layer: LayerName;
+}): CopperVertexId =>
   `${point.layer}:${coordinateKey(point.x)}:${coordinateKey(point.y)}`;
 
-const edgeKey = (first: string, second: string, kind: CopperEdge["kind"]) =>
+const edgeKey = (
+  first: CopperVertexId,
+  second: CopperVertexId,
+  kind: CopperEdge["kind"],
+): CopperEdgeId =>
   first < second ? `${kind}:${first}|${second}` : `${kind}:${second}|${first}`;
 
 const cross = (
@@ -84,7 +97,7 @@ const parameterOnSegment = (
 };
 
 const pointIsOnSegment = (
-  point: { x: number; y: number; layer: string },
+  point: { x: number; y: number; layer: LayerName },
   segment: RawWireSegment,
 ) => {
   if (point.layer !== segment.start.layer) return false;
@@ -305,8 +318,8 @@ const buildCopperGraph = (
 };
 
 const graphHasCycle = (graph: CopperGraph) => {
-  const parent = new Map<string, string>();
-  const find = (key: string): string => {
+  const parent = new Map<CopperVertexId, CopperVertexId>();
+  const find = (key: CopperVertexId): CopperVertexId => {
     const current = parent.get(key) ?? key;
     if (current === key) return key;
     const root = find(current);
@@ -323,10 +336,13 @@ const graphHasCycle = (graph: CopperGraph) => {
   return false;
 };
 
-const otherEnd = (edge: CopperEdge, vertex: string) =>
+const otherEnd = (edge: CopperEdge, vertex: CopperVertexId) =>
   edge.first === vertex ? edge.second : edge.first;
 
-const selectTerminalTree = (graph: CopperGraph, terminalKeys: string[]) => {
+const selectTerminalTree = (
+  graph: CopperGraph,
+  terminalKeys: CopperVertexId[],
+) => {
   const terminals = new Set(terminalKeys);
   for (const terminal of terminals) {
     if (!graph.vertices.has(terminal)) {
@@ -335,15 +351,17 @@ const selectTerminalTree = (graph: CopperGraph, terminalKeys: string[]) => {
       );
     }
   }
-  const parent = new Map([...graph.vertices.keys()].map((key) => [key, key]));
-  const find = (key: string): string => {
+  const parent = new Map<CopperVertexId, CopperVertexId>(
+    [...graph.vertices.keys()].map((key) => [key, key]),
+  );
+  const find = (key: CopperVertexId): CopperVertexId => {
     const current = parent.get(key)!;
     if (current === key) return key;
     const root = find(current);
     parent.set(key, root);
     return root;
   };
-  const selectedEdges = new Set<string>();
+  const selectedEdges = new Set<CopperEdgeId>();
   for (const edge of [...graph.edges.values()].sort(
     (first, second) =>
       first.cost - second.cost || first.key.localeCompare(second.key),
@@ -358,8 +376,8 @@ const selectTerminalTree = (graph: CopperGraph, terminalKeys: string[]) => {
 
   // Kruskal spans every geometric subdivision point. Remove leaves that are
   // not actual trace attachments so remnants of a deleted cycle disappear.
-  const degree = new Map<string, number>();
-  const queue: string[] = [];
+  const degree = new Map<CopperVertexId, number>();
+  const queue: CopperVertexId[] = [];
   for (const edgeKey of selectedEdges) {
     const edge = graph.edges.get(edgeKey)!;
     degree.set(edge.first, (degree.get(edge.first) ?? 0) + 1);
@@ -387,12 +405,15 @@ const selectTerminalTree = (graph: CopperGraph, terminalKeys: string[]) => {
 
 const findTreePath = (
   graph: CopperGraph,
-  selectedEdges: Set<string>,
-  source: string,
-  target: string,
+  selectedEdges: Set<CopperEdgeId>,
+  source: CopperVertexId,
+  target: CopperVertexId,
 ) => {
   const queue = [source];
-  const previous = new Map<string, { vertex: string; edge: CopperEdge }>();
+  const previous = new Map<
+    CopperVertexId,
+    { vertex: CopperVertexId; edge: CopperEdge }
+  >();
   const visited = new Set([source]);
   while (queue.length > 0) {
     const current = queue.shift()!;
@@ -411,7 +432,11 @@ const findTreePath = (
       `No selected same-net path connects ${source} to ${target}`,
     );
   }
-  const reversed: Array<{ from: string; to: string; edge: CopperEdge }> = [];
+  const reversed: Array<{
+    from: CopperVertexId;
+    to: CopperVertexId;
+    edge: CopperEdge;
+  }> = [];
   let current = target;
   while (current !== source) {
     const step = previous.get(current)!;
@@ -427,10 +452,10 @@ const pathToTrace = (
   original: SimplifiedPcbTrace,
   graph: CopperGraph,
   path: ReturnType<typeof findTreePath>,
-  sourceKey: string,
+  sourceKey: CopperVertexId,
 ): SimplifiedPcbTrace => {
   const route: SimplifiedPcbTrace["route"] = [];
-  const usedViaIds = new Set<string>();
+  const usedViaIds = new Set<PrefabricatedViaId>();
   const pushWire = (vertex: CopperVertex) => {
     const previous = route.at(-1);
     if (
@@ -492,7 +517,7 @@ export const pruneRedundantSameNetCopper = (
   let cycleCount = 0;
   let skippedCycleCount = 0;
   let prunedEdgeCount = 0;
-  const routeIndexesByNet = new Map<string, number[]>();
+  const routeIndexesByNet = new Map<NetId, number[]>();
   for (let index = 0; index < solution.routes.length; index++) {
     const indexes = routeIndexesByNet.get(solution.routes[index]!.netId) ?? [];
     indexes.push(index);
