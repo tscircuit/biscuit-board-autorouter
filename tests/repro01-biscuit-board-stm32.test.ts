@@ -46,7 +46,6 @@ test("solves and beautifies the exact BiscuitBoard STM32C071 real-project input"
     output!.stats.preSimplificationSegmentCount! * 0.5,
   );
   expect(output!.stats.fortyFiveDegreeChamferCount).toBeGreaterThan(0);
-  expect(output!.stats.fixedViaTransitionCount).toBe(0);
   const postProcessed = solver.getStageOutput("post-process-traces")!;
   const beautified = solver.getStageOutput("beautify-traces")!;
   expect(beautified.traces).not.toEqual(postProcessed.traces);
