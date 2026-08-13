@@ -87,7 +87,7 @@ const cropSvgToIssue = (svg: string) => {
     );
 };
 
-test("reproduces the redundant C_MCU-to-via GND branch", async () => {
+test("attaches the D_PWR GND branch to existing same-net copper", async () => {
   expect(input.connections).toHaveLength(17);
   expect(input.obstacles).toHaveLength(119);
   expect(input.minBoardEdgeClearance).toBe(0.35);
@@ -129,7 +129,7 @@ test("reproduces the redundant C_MCU-to-via GND branch", async () => {
     layer: "top",
   });
 
-  const crossing = wireSegments(cmcuToVia!)
+  const properCrossing = wireSegments(cmcuToVia!)
     .flatMap((viaSegment) =>
       wireSegments(cnrstToDPwr!).flatMap((powerSegment) => {
         const intersection = getProperIntersection(viaSegment, powerSegment);
@@ -137,10 +137,20 @@ test("reproduces the redundant C_MCU-to-via GND branch", async () => {
       }),
     )
     .at(0);
-  expect(crossing).toBeDefined();
-  expect(crossing!.x).toBeCloseTo(GND_VIA.x, 5);
-  expect(crossing!.y).toBeGreaterThan(C_NRST_GND.y);
-  expect(crossing!.y).toBeLessThan(GND_VIA.y);
+  expect(properCrossing).toBeUndefined();
+  const branchWires = cnrstToDPwr!.route.filter(
+    (point): point is WirePoint => point.route_type === "wire",
+  );
+  const junction = branchWires[0]!;
+  expect(junction.x).toBeCloseTo(GND_VIA.x, 5);
+  expect(junction.y).toBeGreaterThan(C_NRST_GND.y);
+  expect(junction.y).toBeLessThan(GND_VIA.y);
+  expect(branchWires.at(-1)).toMatchObject({
+    x: D_PWR_GND.x,
+    y: D_PWR_GND.y,
+    layer: "top",
+  });
+  expect(output.stats.sameNetTreeAttachmentCount).toBeGreaterThan(0);
 
   const graphics = solver.visualize();
   const annotatedGraphics = {
@@ -148,19 +158,32 @@ test("reproduces the redundant C_MCU-to-via GND branch", async () => {
     lines: [
       ...(graphics.lines ?? []),
       {
-        points: [C_MCU_GND, { x: GND_VIA.x, y: 2.1625 }, crossing!],
+        points: [
+          C_NRST_GND,
+          { x: 12.91, y: 8.0025 },
+          { x: 12.91, y: 11.415 },
+          junction,
+        ],
         strokeColor: "#dc2626",
         strokeWidth: 0.13,
         zIndex: 10,
-        label: "redundant same-net copper",
+        label: "same-net branch no longer emitted",
       },
       {
-        points: [crossing!, GND_VIA],
+        points: [D_PWR_GND, junction],
         strokeColor: "#84cc16",
         strokeWidth: 0.13,
         strokeDash: [0.2, 0.1],
         zIndex: 11,
-        label: "required connection to prefabricated via",
+        label: "new branch stops on existing same-net copper",
+      },
+      {
+        points: [junction, GND_VIA],
+        strokeColor: "#2563eb",
+        strokeWidth: 0.13,
+        strokeDash: [0.2, 0.1],
+        zIndex: 11,
+        label: "existing same-net path to prefabricated via",
       },
       {
         points: [
@@ -174,7 +197,7 @@ test("reproduces the redundant C_MCU-to-via GND branch", async () => {
     circles: [
       ...(graphics.circles ?? []),
       {
-        center: crossing!,
+        center: junction,
         radius: 0.22,
         fill: "#facc15",
         stroke: "#854d0e",
@@ -187,7 +210,7 @@ test("reproduces the redundant C_MCU-to-via GND branch", async () => {
       { x: 14.35, y: 6.7, text: "C_NRST GND", fontSize: 0.42 },
       { x: 7.8, y: 15.65, text: "D_PWR GND", fontSize: 0.42 },
       { x: 12.75, y: 20.5, text: "prefabricated via", fontSize: 0.42 },
-      { x: 14.7, y: 11.25, text: "trim at crossing", fontSize: 0.42 },
+      { x: 14.7, y: 11.25, text: "attach at crossing", fontSize: 0.42 },
     ],
   };
   const fullSvg = getSvgFromGraphicsObject(annotatedGraphics, {

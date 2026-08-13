@@ -1053,7 +1053,9 @@ const postProcessBiscuitBoardTracesOnce = (
   }
 
   traces = cloneTraces(repairedSolution.traces);
-  const protectedJunctionKeys = new Set<string>();
+  const protectedJunctionKeys = new Set(
+    solution.sameNetTreeJunctions?.map(junctionKey),
+  );
   for (const route of solution.routes) {
     const demand = prepared.demandById.get(route.routeId)!;
     for (const endpointNode of [route.nodePath[0], route.nodePath.at(-1)]) {
@@ -1130,6 +1132,7 @@ const postProcessBiscuitBoardTracesOnce = (
       postSimplificationSegmentCount,
     },
   };
+  delete output.sameNetTreeJunctions;
   const finalViolations = getTraceClearanceViolations(
     prepared,
     output,

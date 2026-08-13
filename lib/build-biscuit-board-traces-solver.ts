@@ -1,4 +1,9 @@
 import type { SimplifiedPcbTrace } from "@tscircuit/core";
+import {
+  distance,
+  getSegmentIntersection,
+  pointToSegmentDistance,
+} from "@tscircuit/math-utils";
 import { BaseSolver } from "@tscircuit/solver-utils";
 import type { GraphicsObject } from "graphics-debug";
 import { pointsEqual, visualizePreparedProblem } from "./geometry";
@@ -9,6 +14,243 @@ import type {
 } from "./types";
 
 const sanitizeId = (value: string) => value.replace(/[^a-zA-Z0-9_-]+/g, "_");
+const ATTACHMENT_EPSILON = 1e-7;
+
+type RoutePoint = SimplifiedPcbTrace["route"][number];
+type WirePoint = Extract<RoutePoint, { route_type: "wire" }>;
+
+interface IndexedWireSegment {
+  start: WirePoint;
+  end: WirePoint;
+  startRouteIndex: number;
+  endRouteIndex: number;
+}
+
+const getWireSegments = (trace: SimplifiedPcbTrace): IndexedWireSegment[] =>
+  trace.route.flatMap((point, index) => {
+    const next = trace.route[index + 1];
+    return point.route_type === "wire" &&
+      next?.route_type === "wire" &&
+      point.layer === next.layer &&
+      !pointsEqual(point, next)
+      ? [
+          {
+            start: point,
+            end: next,
+            startRouteIndex: index,
+            endRouteIndex: index + 1,
+          },
+        ]
+      : [];
+  });
+
+const firstIntersectionAlong = (
+  start: WirePoint,
+  end: WirePoint,
+  targetStart: WirePoint,
+  targetEnd: WirePoint,
+) => {
+  if (start.layer !== targetStart.layer) return null;
+  const intersection = getSegmentIntersection(
+    start,
+    end,
+    targetStart,
+    targetEnd,
+  );
+  if (!intersection) return null;
+  const routeRatio = distance(start, intersection) / distance(start, end);
+  const targetRatio =
+    distance(targetStart, intersection) / distance(targetStart, targetEnd);
+  if (
+    routeRatio <= ATTACHMENT_EPSILON ||
+    routeRatio >= 1 - ATTACHMENT_EPSILON ||
+    targetRatio <= ATTACHMENT_EPSILON ||
+    targetRatio >= 1 - ATTACHMENT_EPSILON
+  ) {
+    return null;
+  }
+  return {
+    ratio: routeRatio,
+    point: {
+      ...start,
+      ...intersection,
+    },
+  };
+};
+
+const pointIsOnSegment = (point: WirePoint, segment: IndexedWireSegment) => {
+  if (point.layer !== segment.start.layer) return false;
+  return (
+    pointToSegmentDistance(point, segment.start, segment.end) <=
+    ATTACHMENT_EPSILON
+  );
+};
+
+const insertJunction = (
+  trace: SimplifiedPcbTrace,
+  segment: IndexedWireSegment,
+  point: WirePoint,
+) => {
+  if (pointsEqual(segment.start, point) || pointsEqual(segment.end, point)) {
+    return;
+  }
+  trace.route.splice(segment.endRouteIndex, 0, {
+    ...segment.start,
+    x: point.x,
+    y: point.y,
+  });
+};
+
+export const attachSameNetTraceBranches = (
+  solution: BiscuitBoardRoutingSolution,
+): BiscuitBoardRoutingSolution => {
+  const traces = solution.traces.map((trace) => ({
+    ...trace,
+    route: trace.route.map((point) => ({ ...point })),
+  }));
+  const treeTraceIndexesByNet = new Map<string, number[]>();
+  const junctions: Array<{ x: number; y: number; layer: string }> = [];
+  let attachmentCount = 0;
+
+  for (let traceIndex = 0; traceIndex < traces.length; traceIndex++) {
+    const trace = traces[traceIndex]!;
+    const netId = solution.routes[traceIndex]!.netId;
+    const treeTraceIndexes = treeTraceIndexesByNet.get(netId) ?? [];
+    treeTraceIndexesByNet.set(netId, treeTraceIndexes);
+    const wires = trace.route.filter(
+      (point): point is WirePoint => point.route_type === "wire",
+    );
+    const first = wires[0];
+    const last = wires.at(-1);
+    if (!first || !last || treeTraceIndexes.length === 0) {
+      treeTraceIndexes.push(traceIndex);
+      continue;
+    }
+
+    const treeSegments = treeTraceIndexes.flatMap((index) =>
+      getWireSegments(traces[index]!).map((segment) => ({
+        ...segment,
+        traceIndex: index,
+      })),
+    );
+    const firstIsConnected = treeSegments.some((segment) =>
+      pointIsOnSegment(first, segment),
+    );
+    const lastIsConnected = treeSegments.some((segment) =>
+      pointIsOnSegment(last, segment),
+    );
+    if (firstIsConnected === lastIsConnected) {
+      treeTraceIndexes.push(traceIndex);
+      continue;
+    }
+
+    const fromStart = !firstIsConnected;
+    const candidateSegments = getWireSegments(trace);
+    const orderedSegments = fromStart
+      ? candidateSegments.map((segment) => ({
+          segment,
+          travelStart: segment.start,
+          travelEnd: segment.end,
+        }))
+      : [...candidateSegments].reverse().map((segment) => ({
+          segment,
+          travelStart: segment.end,
+          travelEnd: segment.start,
+        }));
+    let attachment:
+      | {
+          point: WirePoint;
+          candidate: IndexedWireSegment;
+          anchor: (typeof treeSegments)[number];
+        }
+      | undefined;
+    for (const candidate of orderedSegments) {
+      let closest:
+        | {
+            ratio: number;
+            point: WirePoint;
+            anchor: (typeof treeSegments)[number];
+          }
+        | undefined;
+      for (const anchor of treeSegments) {
+        const intersection = firstIntersectionAlong(
+          candidate.travelStart,
+          candidate.travelEnd,
+          anchor.start,
+          anchor.end,
+        );
+        if (!intersection || (closest && intersection.ratio >= closest.ratio)) {
+          continue;
+        }
+        closest = { ...intersection, anchor };
+      }
+      if (!closest) continue;
+      attachment = {
+        point: closest.point,
+        candidate: candidate.segment,
+        anchor: closest.anchor,
+      };
+      break;
+    }
+    if (!attachment) {
+      treeTraceIndexes.push(traceIndex);
+      continue;
+    }
+
+    const discardedRoute = fromStart
+      ? trace.route.slice(attachment.candidate.endRouteIndex)
+      : trace.route.slice(0, attachment.candidate.startRouteIndex + 1);
+    if (
+      discardedRoute.some((point) => point.route_type === "through_obstacle")
+    ) {
+      treeTraceIndexes.push(traceIndex);
+      continue;
+    }
+
+    if (fromStart) {
+      trace.route = [
+        ...trace.route.slice(0, attachment.candidate.startRouteIndex + 1),
+        attachment.point,
+      ];
+    } else {
+      trace.route = [
+        attachment.point,
+        ...trace.route.slice(attachment.candidate.endRouteIndex),
+      ];
+    }
+    trace.route = trace.route.filter(
+      (point, index, route) =>
+        index === 0 ||
+        point.route_type !== "wire" ||
+        route[index - 1]!.route_type !== "wire" ||
+        !pointsEqual(point, route[index - 1] as WirePoint),
+    );
+    insertJunction(
+      traces[attachment.anchor.traceIndex]!,
+      attachment.anchor,
+      attachment.point,
+    );
+    junctions.push({
+      x: attachment.point.x,
+      y: attachment.point.y,
+      layer: attachment.point.layer,
+    });
+    treeTraceIndexes.push(traceIndex);
+    attachmentCount++;
+  }
+
+  return {
+    ...solution,
+    traces,
+    ...(junctions.length > 0 ? { sameNetTreeJunctions: junctions } : {}),
+    stats: {
+      ...solution.stats,
+      ...(attachmentCount > 0
+        ? { sameNetTreeAttachmentCount: attachmentCount }
+        : {}),
+    },
+  };
+};
 
 const expandSharedNetRoute = (
   prepared: PreparedBiscuitRoutingProblem,
@@ -246,7 +488,10 @@ export class BuildBiscuitBoardTracesSolver extends BaseSolver {
       ),
     );
     assertOnlyPrefabricatedVias(this.prepared, traces);
-    this.output = { ...this.routed, traces };
+    this.output = attachSameNetTraceBranches({
+      ...this.routed,
+      traces,
+    });
     this.stats = this.output.stats;
     this.progress = 1;
     this.solved = true;

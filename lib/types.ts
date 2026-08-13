@@ -157,10 +157,13 @@ export interface BiscuitBoardRoutingStats {
   beautifiedClearance?: number;
   sameNetConsolidationCount?: number;
   fortyFiveDegreeChamferCount?: number;
+  sameNetTreeAttachmentCount?: number;
 }
 
 export interface BiscuitBoardRoutingSolution {
   routes: RoutedConnection[];
   traces: SimplifiedPcbTrace[];
   stats: BiscuitBoardRoutingStats;
+  /** Internal junctions that must survive trace simplification. */
+  sameNetTreeJunctions?: Array<Point & { layer: string }>;
 }
