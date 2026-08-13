@@ -27,6 +27,7 @@ test("every pipeline stage exposes a meaningful visualization", () => {
     "build-and-validate-traces",
     "post-process-traces",
     "beautify-traces",
+    "prune-redundant-same-net-copper",
     "expand-traces",
   ] as const;
   for (const stageName of stageNames) {

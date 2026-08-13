@@ -166,6 +166,9 @@ export interface BiscuitBoardRoutingStats {
   beautifiedClearance?: number;
   sameNetConsolidationCount?: number;
   fortyFiveDegreeChamferCount?: number;
+  sameNetCyclePruneCount?: number;
+  sameNetCyclePruneSkipCount?: number;
+  prunedSameNetEdgeCount?: number;
 }
 
 export interface BiscuitBoardRoutingSolution {

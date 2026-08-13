@@ -44,7 +44,10 @@ The exported `BiscuitBoardAutorouter` also implements tscircuit's
    between foreign nets, pulls unobstructed parallel same-net spans onto shared
    copper, and replaces each remaining Manhattan corner with the largest
    clearance-safe 45° chamfer.
-6. `ExpandBiscuitBoardTracesSolver` uses
+6. `PruneRedundantSameNetCopperSolver` planarizes same-net intersections and
+   removes cycles while retaining an existing-copper path between every routed
+   trace attachment and every required prefabricated via transition.
+7. `ExpandBiscuitBoardTracesSolver` uses
    `@tscircuit/power-trace-expander` to widen the cleaned routes toward each
    connection's `nominalTraceWidth`. It may shove narrower traces or detour
    around obstacles, but disables new vias, revalidates clearance and the
