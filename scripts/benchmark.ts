@@ -152,6 +152,9 @@ const runBenchmarkCase = (benchmarkCase: BenchmarkCase) => {
   const startedAt = performance.now();
   let nextProgressAt = progressIntervalMs;
   let thrownError: string | null = null;
+  let peakCommittedDemandCount = 0;
+  let peakCommittedDemandElapsedMs = 0;
+  const stageDurationsMs = new Map<string, number>();
 
   if (!jsonOnly) {
     process.stderr.write(
@@ -165,8 +168,21 @@ const runBenchmarkCase = (benchmarkCase: BenchmarkCase) => {
       !solver.failed &&
       performance.now() - startedAt < maximumRuntimeMs
     ) {
+      const stage = solver.stage;
+      const stepStartedAt = performance.now();
       solver.step();
       const elapsedMs = performance.now() - startedAt;
+      stageDurationsMs.set(
+        stage,
+        (stageDurationsMs.get(stage) ?? 0) +
+          (performance.now() - stepStartedAt),
+      );
+      const currentCommittedDemandCount =
+        solver.getSolver("route-with-rip-and-replace")?.stats?.routedCount ?? 0;
+      if (currentCommittedDemandCount > peakCommittedDemandCount) {
+        peakCommittedDemandCount = currentCommittedDemandCount;
+        peakCommittedDemandElapsedMs = elapsedMs;
+      }
       if (!jsonOnly && elapsedMs >= nextProgressAt) {
         const routeSolver = solver.getSolver("route-with-rip-and-replace");
         process.stderr.write(
@@ -231,12 +247,20 @@ const runBenchmarkCase = (benchmarkCase: BenchmarkCase) => {
     failed: solver.failed,
     error: thrownError ?? (solver.error ? getErrorMessage(solver.error) : null),
     stage: solver.stage,
+    stageDurationsMs: Object.fromEntries(
+      [...stageDurationsMs].map(([stage, durationMs]) => [
+        stage,
+        Math.round(durationMs),
+      ]),
+    ),
     configuredOptions: benchmarkCase.options,
     effectiveRouteOrder: prepared?.options.routeOrder ?? null,
     connectionCount: benchmarkCase.input.connections.length,
     obstacleCount: benchmarkCase.input.obstacles.length,
     prefabricatedViaCount: countPrefabricatedVias(benchmarkCase.input),
     expectedTraceCount,
+    peakCommittedDemandCount,
+    peakCommittedDemandElapsedMs: Math.round(peakCommittedDemandElapsedMs),
     routedDemandCount,
     pendingDemandCount,
     traceCount: output?.traces.length ?? 0,

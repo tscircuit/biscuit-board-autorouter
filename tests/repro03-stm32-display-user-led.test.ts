@@ -2,7 +2,11 @@ import "bun-match-svg";
 import { expect, test } from "bun:test";
 import type { SimpleRouteJson } from "@tscircuit/core";
 import { getSvgFromGraphicsObject } from "graphics-debug";
-import { BiscuitBoardRoutingPipelineSolver } from "../lib";
+import {
+  BiscuitBoardRoutingPipelineSolver,
+  getTraceClearanceViolations,
+  type PreparedBiscuitRoutingProblem,
+} from "../lib";
 import capturedInput from "../repros/fixtures/repro03-stm32-display-user-led.srj.json";
 
 const input = capturedInput as SimpleRouteJson;
@@ -44,7 +48,13 @@ test("reproduces irregular routing around R_USER_LED on the STM32 display board"
 
   expect(solver.failed).toBe(false);
   expect(solver.solved).toBe(true);
-  expect(solver.getOutput()?.traces).toHaveLength(33);
+  const output = solver.getOutput();
+  expect(output?.traces).toHaveLength(33);
+  const prepared = solver.getStageOutput<PreparedBiscuitRoutingProblem>(
+    "generate-hypergraph",
+  );
+  expect(prepared).toBeDefined();
+  expect(getTraceClearanceViolations(prepared!, output!)).toEqual([]);
 
   const margin = R_USER_LED_VIEWBOX_MARGIN;
   const graphics = solver.visualize();

@@ -54,9 +54,13 @@ interface ActiveSearch {
   congestionCost: number;
   sourcePoint: Point;
   targetPoint: Point;
-  isShortSignal: boolean;
-  isCorridorRoute: boolean;
-  net51Segment: [Point, Point] | null;
+  directCorridorPenaltyScale: number;
+  preferredLayerCorridorBonusScale: number;
+  protectedCorridors: Array<{
+    from: Point;
+    to: Point;
+    minimumDistance: number;
+  }>;
 }
 
 interface TargetKdNode {
@@ -171,6 +175,7 @@ const NOMINAL_OBSTACLE_PENALTY_MULTIPLIER = 10;
 export class RipUpRubberBandSolver extends BaseSolver {
   private readonly committed = new Map<string, RoutedConnection>();
   private readonly pending: RouteDemand[];
+  private readonly inputIndexByDemand = new WeakMap<RouteDemand, number>();
   private readonly edgeOwners = new Map<number, Set<string>>();
   private readonly nodeOwners = new Map<number, Set<string>>();
   private readonly routeDependenciesByRoute = new Map<string, Set<string>>();
@@ -249,6 +254,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
   private readonly occupancyByEdge = new Map<number, Map<string, number[]>>();
   private readonly ownedNodeCountByNet = new Map<string, Map<number, number>>();
   private readonly effectiveClearance: number;
+  private readonly routingScale: number;
   private committedFixedViaTransitionCount = 0;
   private activeSearch: ActiveSearch | null = null;
   private connectivityRepairCount = 0;
@@ -257,12 +263,17 @@ export class RipUpRubberBandSolver extends BaseSolver {
   private negotiationPassCount = 0;
   private lastConflictRouteCount = 0;
   private lastConflictComponents: string[][] = [];
+  private adaptivePriorityChangeCount = 0;
 
   constructor(public readonly prepared: PreparedBiscuitRoutingProblem) {
     super();
     this.effectiveClearance = Math.max(
       prepared.options.gridClearance,
       prepared.input.minTraceToPadEdgeClearance ?? 0,
+    );
+    this.routingScale = Math.hypot(
+      prepared.input.bounds.maxX - prepared.input.bounds.minX,
+      prepared.input.bounds.maxY - prepared.input.bounds.minY,
     );
     this.historyCostByEdge = new Float64Array(prepared.edges.length);
     this.historyCostByNode = new Float64Array(prepared.nodes.length);
@@ -277,7 +288,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
       );
       const comparison =
         rightDistance - leftDistance ||
-        left.routeId.localeCompare(right.routeId);
+        prepared.demands.indexOf(left) - prepared.demands.indexOf(right);
       return prepared.options.routeOrder === "shortest_first"
         ? -comparison
         : comparison;
@@ -303,12 +314,17 @@ export class RipUpRubberBandSolver extends BaseSolver {
         }
       }
     }
-    if (prepared.options.routeOrder === "signal_longest_first") {
+    if (
+      prepared.options.routeOrder === "adaptive" ||
+      prepared.options.routeOrder === "signal_longest_first"
+    ) {
       this.pending.sort((left, right) => {
-        const leftIsSignal = left.connectionName.startsWith("source_trace_");
-        const rightIsSignal = right.connectionName.startsWith("source_trace_");
-        if (leftIsSignal !== rightIsSignal) return leftIsSignal ? -1 : 1;
-        return leftIsSignal
+        const leftIsPointToPoint = left.connectionTerminalCount === 2;
+        const rightIsPointToPoint = right.connectionTerminalCount === 2;
+        if (leftIsPointToPoint !== rightIsPointToPoint) {
+          return leftIsPointToPoint ? -1 : 1;
+        }
+        return leftIsPointToPoint
           ? compareByDistance(left, right)
           : prepared.demands.indexOf(left) - prepared.demands.indexOf(right);
       });
@@ -316,6 +332,9 @@ export class RipUpRubberBandSolver extends BaseSolver {
       this.pending.sort(compareByDistance);
     }
     this.pending = this.groupDemandsByNet(this.pending);
+    for (let index = 0; index < this.pending.length; index++) {
+      this.inputIndexByDemand.set(this.pending[index]!, index);
+    }
     this.initializeFinePitchLayerAssignments();
     this.rejectImpracticalBottomLayerPreferences();
     const maximumRoutingAttempts =
@@ -428,7 +447,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
 
   override _step() {
     if (!this.activeSearch) {
-      const demand = this.pending.shift();
+      const demand = this.takeNextDemand();
       if (!demand) {
         this.finishOrScheduleNegotiationPass();
         return;
@@ -453,6 +472,88 @@ export class RipUpRubberBandSolver extends BaseSolver {
         ? 1
         : this.committed.size / this.prepared.demandById.size;
     this.updateStats();
+  }
+
+  /**
+   * Select the most constrained pending demand using only routing state and
+   * topology. Recomputing this priority after every commit lets occupancy and
+   * congestion history change the order instead of switching between static
+   * longest- and shortest-first passes.
+   */
+  private takeNextDemand() {
+    if (
+      this.prepared.options.routeOrder !== "adaptive" ||
+      this.pending.length < 2
+    ) {
+      return this.pending.shift();
+    }
+
+    // A ripped demand's position is already the output of conflict-component
+    // negotiation; reshuffling it can recreate the same local cycle. Fresh
+    // work adapts within a bounded topology-ordered window so congestion can
+    // influence priority without starving another net.
+    if (this.ripCountByRoute.has(this.pending[0]!.routeId)) {
+      return this.pending.shift();
+    }
+    let bestIndex = 0;
+    const lookahead = Math.min(8, this.pending.length);
+    for (let index = 1; index < lookahead; index++) {
+      if (this.ripCountByRoute.has(this.pending[index]!.routeId)) break;
+      if (
+        this.compareAdaptivePriority(
+          this.pending[index]!,
+          this.pending[bestIndex]!,
+        ) < 0
+      ) {
+        bestIndex = index;
+      }
+    }
+    if (bestIndex > 0) this.adaptivePriorityChangeCount++;
+    return this.pending.splice(bestIndex, 1)[0];
+  }
+
+  private compareAdaptivePriority(left: RouteDemand, right: RouteDemand) {
+    const leftPriority = this.getAdaptivePriority(left);
+    const rightPriority = this.getAdaptivePriority(right);
+    return (
+      rightPriority.score - leftPriority.score ||
+      leftPriority.inputIndex - rightPriority.inputIndex
+    );
+  }
+
+  private getAdaptivePriority(demand: RouteDemand) {
+    const ownedNodes = this.getOwnedNodesForNet(demand.netId);
+    let freeEndpointChoices = 0;
+    let historyPressure = 0;
+    for (const nodeIndex of [demand.sourceNode, demand.targetNode]) {
+      for (const adjacent of this.prepared.adjacency[nodeIndex]!) {
+        const edge = this.prepared.edges[adjacent.edgeId]!;
+        historyPressure +=
+          this.historyCostByEdge[adjacent.edgeId]! +
+          this.historyCostByNode[adjacent.toNode]!;
+        if (
+          this.nodeAllowsDemand(adjacent.toNode, demand) &&
+          this.edgeAllowsDemand(edge, demand) &&
+          this.getForeignOwners(edge, demand).length === 0
+        ) {
+          freeEndpointChoices++;
+        }
+      }
+    }
+    const startedNet = ownedNodes.size > 0 ? 1 : 0;
+    const congestionPressure =
+      historyPressure / Math.max(1, freeEndpointChoices);
+    const topologyOrder = this.inputIndexByDemand.get(demand) ?? 0;
+    return {
+      score:
+        -topologyOrder * this.routingScale * 2 +
+        startedNet * this.routingScale * 4 +
+        (this.prepared.options.gridPitch * 4) / (freeEndpointChoices + 1) +
+        congestionPressure * 0.05,
+      freeEndpointChoices,
+      historyPressure,
+      inputIndex: topologyOrder,
+    };
   }
 
   private createSearch(
@@ -512,7 +613,39 @@ export class RipUpRubberBandSolver extends BaseSolver {
       this.requiredPrefabViaIdsByRoute.get(demand.routeId) ?? [];
     const sourcePoint = this.prepared.nodes[demand.sourceNode]!;
     const targetPoint = this.prepared.nodes[demand.targetNode]!;
-    const trace93 = this.prepared.demandById.get("source_trace_93:0");
+    const escapeConstraints = this.getTerminalEscapeConstraints(demand);
+    const directDistance = pointDistance(sourcePoint, targetPoint);
+    const isShallowEscapeCorridor = this.isShallowEscapeCorridor(
+      demand,
+      escapeConstraints,
+    );
+    const protectedCorridors = this.prepared.demands.flatMap((candidate) => {
+      if (
+        demand.connectionTerminalCount <= 2 ||
+        demand.connectionTerminalCount > 4 ||
+        directDistance < this.prepared.options.gridPitch * 4 ||
+        candidate.connectionTerminalCount !== 2 ||
+        candidate.netId === demand.netId
+      ) {
+        return [];
+      }
+      const from = this.prepared.nodes[candidate.sourceNode]!;
+      const to = this.prepared.nodes[candidate.targetNode]!;
+      const candidateDistance = pointDistance(from, to);
+      if (
+        candidateDistance < this.prepared.options.gridPitch * 2 ||
+        candidateDistance > this.prepared.options.gridPitch * 3 ||
+        segmentDistance(sourcePoint, targetPoint, from, to) > 1e-7
+      ) {
+        return [];
+      }
+      const minimumDistance = Math.max(
+        this.prepared.options.gridPitch / 2 -
+          this.prepared.options.gridClearance / 2,
+        demand.width / 2 + candidate.width / 2 + this.effectiveClearance,
+      );
+      return [{ from, to, minimumDistance }];
+    });
     return {
       demand,
       allowBlockers,
@@ -556,7 +689,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
         ? (this.requiredGuideCountByConnectionName.get(demand.connectionName) ??
           0)
         : 0,
-      escapeConstraints: this.getTerminalEscapeConstraints(demand),
+      escapeConstraints,
       routeEdgeHistory: this.historyCostByRouteEdge.get(demand.routeId),
       layerPenalties: this.layerPenaltyByRoute.get(demand.routeId),
       preferredLayer,
@@ -564,22 +697,19 @@ export class RipUpRubberBandSolver extends BaseSolver {
         this.prepared.options.ripCost * (this.negotiationPassCount + 1) ** 2,
       sourcePoint,
       targetPoint,
-      isShortSignal:
-        demand.connectionName.startsWith("source_trace_") &&
-        pointDistance(sourcePoint, targetPoint) <= 10 &&
-        !this.requiredPrefabViaIdsByRoute.has(demand.routeId),
-      isCorridorRoute: [
-        "source_trace_30",
-        "source_trace_33",
-        "source_trace_34",
-      ].includes(demand.connectionName),
-      net51Segment:
-        demand.routeId === "source_net_5:1" && trace93
-          ? [
-              this.prepared.nodes[trace93.sourceNode]!,
-              this.prepared.nodes[trace93.targetNode]!,
-            ]
-          : null,
+      directCorridorPenaltyScale:
+        demand.connectionTerminalCount === 2 &&
+        escapeConstraints.length > 0 &&
+        directDistance <= 10 &&
+        !this.requiredPrefabViaIdsByRoute.has(demand.routeId)
+          ? 4
+          : 0,
+      preferredLayerCorridorBonusScale: isShallowEscapeCorridor
+        ? this.requiredPrefabViaIdsByRoute.has(demand.routeId)
+          ? 8
+          : 4
+        : 0,
+      protectedCorridors,
     };
   }
 
@@ -937,36 +1067,13 @@ export class RipUpRubberBandSolver extends BaseSolver {
   private getTerminalEscapeConstraints(demand: RouteDemand) {
     const cached = this.terminalEscapeConstraintsByDemand.get(demand);
     if (cached) return cached;
-    if (demand.routeId === "source_net_1:4") {
-      const constraints: TerminalEscapeConstraint[] = [
-        {
-          terminalNode: demand.sourceNode,
-          axis: "x",
-          direction: 1,
-          minimumRun: 1.1,
-        },
-        {
-          terminalNode: demand.targetNode,
-          axis: "x",
-          direction: 1,
-          minimumRun: 0.75,
-        },
-      ];
-      this.terminalEscapeConstraintsByDemand.set(demand, constraints);
-      return constraints;
-    }
-    const connection = this.prepared.input.connections.find(
-      (candidate) => candidate.name === demand.connectionName,
-    );
-    if (
-      !demand.connectionName.startsWith("source_trace_") ||
-      connection?.pointsToConnect.length !== 2
-    ) {
-      this.terminalEscapeConstraintsByDemand.set(demand, []);
-      return [];
+    const junctionConstraints = this.getDenseJunctionEscapeConstraints(demand);
+    if (demand.connectionTerminalCount !== 2) {
+      this.terminalEscapeConstraintsByDemand.set(demand, junctionConstraints);
+      return junctionConstraints;
     }
 
-    const constraints: TerminalEscapeConstraint[] = [];
+    const constraints: TerminalEscapeConstraint[] = [...junctionConstraints];
     for (const [terminalNode, otherNode, pointId] of [
       [demand.sourceNode, demand.targetNode, demand.sourcePointId],
       [demand.targetNode, demand.sourceNode, demand.targetPointId],
@@ -1007,6 +1114,157 @@ export class RipUpRubberBandSolver extends BaseSolver {
     return constraints;
   }
 
+  private getDenseJunctionEscapeConstraints(demand: RouteDemand) {
+    const maximumTerminalCount = Math.max(
+      ...this.prepared.demands.map(
+        (candidate) => candidate.connectionTerminalCount,
+      ),
+    );
+    if (demand.connectionTerminalCount !== maximumTerminalCount) return [];
+    const siblingDemands = this.prepared.demands.filter(
+      (candidate) =>
+        candidate.netId === demand.netId &&
+        candidate.sourceNode === demand.sourceNode,
+    );
+    if (siblingDemands.length < 2) return [];
+    const demandDistance = pointDistance(
+      this.prepared.nodes[demand.sourceNode]!,
+      this.prepared.nodes[demand.targetNode]!,
+    );
+    if (
+      siblingDemands.some(
+        (candidate) =>
+          pointDistance(
+            this.prepared.nodes[candidate.sourceNode]!,
+            this.prepared.nodes[candidate.targetNode]!,
+          ) >
+          demandDistance + 1e-7,
+      )
+    ) {
+      return [];
+    }
+    const targetIncidence = this.prepared.demands.filter(
+      (candidate) =>
+        candidate.netId === demand.netId &&
+        (candidate.sourceNode === demand.targetNode ||
+          candidate.targetNode === demand.targetNode),
+    ).length;
+    if (targetIncidence < 3) return [];
+
+    const source = this.prepared.nodes[demand.sourceNode]!;
+    const target = this.prepared.nodes[demand.targetNode]!;
+    if (
+      Math.min(
+        this.prepared.adjacency[demand.sourceNode]!.length,
+        this.prepared.adjacency[demand.targetNode]!.length,
+      ) < this.prepared.options.maxBlockersPerSearch
+    ) {
+      return [];
+    }
+    const axes = (["x", "y"] as const).filter(
+      (axis) => Math.abs(target[axis] - source[axis]) > 1e-7,
+    );
+    if (axes.length === 0) return [];
+    const pressure = (
+      terminalNode: number,
+      axis: "x" | "y",
+      direction: -1 | 1,
+    ) => {
+      const terminal = this.prepared.nodes[terminalNode]!;
+      let blockerCount = 0;
+      let edgeCount = 0;
+      for (const adjacent of this.prepared.adjacency[terminalNode]!) {
+        const edge = this.prepared.edges[adjacent.edgeId]!;
+        if (edge.kind !== "trace") continue;
+        const neighbor = this.prepared.nodes[adjacent.toNode]!;
+        const axialDelta = neighbor[axis] - terminal[axis];
+        const crossAxis = axis === "x" ? "y" : "x";
+        const crossDelta = neighbor[crossAxis] - terminal[crossAxis];
+        if (
+          Math.sign(axialDelta) !== direction ||
+          Math.abs(axialDelta) < Math.abs(crossDelta)
+        ) {
+          continue;
+        }
+        blockerCount += edge.blockingObstacleIndexes.length;
+        edgeCount++;
+      }
+      return edgeCount === 0
+        ? Number.POSITIVE_INFINITY
+        : blockerCount / edgeCount;
+    };
+    const axis = axes.sort((left, right) => {
+      const leftDirection = Math.sign(target[left] - source[left]) as -1 | 1;
+      const rightDirection = Math.sign(target[right] - source[right]) as -1 | 1;
+      return (
+        pressure(demand.sourceNode, left, leftDirection) +
+        pressure(demand.targetNode, left, leftDirection) -
+        (pressure(demand.sourceNode, right, rightDirection) +
+          pressure(demand.targetNode, right, rightDirection))
+      );
+    })[0]!;
+    const direction = Math.sign(target[axis] - source[axis]) as -1 | 1;
+    return [demand.sourceNode, demand.targetNode].flatMap((terminalNode) => {
+      const terminal = this.prepared.nodes[terminalNode]!;
+      const pointId =
+        terminalNode === demand.sourceNode
+          ? demand.sourcePointId
+          : demand.targetPointId;
+      const pad = this.prepared.input.obstacles
+        .filter(
+          (obstacle) =>
+            obstacle.layers.includes(terminal.layer) &&
+            Math.abs(obstacle.center.x - terminal.x) <= 1e-7 &&
+            Math.abs(obstacle.center.y - terminal.y) <= 1e-7 &&
+            (!pointId || obstacle.connectedTo.includes(pointId)),
+        )
+        .sort(
+          (left, right) =>
+            left.width * left.height - right.width * right.height,
+        )[0];
+      return pad
+        ? [
+            {
+              terminalNode,
+              axis,
+              direction,
+              minimumRun: Math.max(
+                this.prepared.options.gridPitch / 2,
+                getTerminalEscapeMinimumRun(
+                  pad,
+                  this.prepared.options.gridClearance,
+                ) + this.prepared.options.gridClearance,
+              ),
+            },
+          ]
+        : [];
+    });
+  }
+
+  private isShallowEscapeCorridor(
+    demand: RouteDemand,
+    constraints = this.getTerminalEscapeConstraints(demand),
+  ) {
+    if (constraints.length === 0) return false;
+    const source = this.prepared.nodes[demand.sourceNode]!;
+    const target = this.prepared.nodes[demand.targetNode]!;
+    const deltaX = Math.abs(target.x - source.x);
+    const deltaY = Math.abs(target.y - source.y);
+    const distance = pointDistance(source, target);
+    const sourceChoiceCount =
+      this.prepared.adjacency[demand.sourceNode]!.length;
+    const targetChoiceCount =
+      this.prepared.adjacency[demand.targetNode]!.length;
+    return (
+      distance >= this.prepared.options.gridPitch * 3 &&
+      distance <= this.prepared.options.gridPitch * 6 &&
+      Math.max(sourceChoiceCount, targetChoiceCount) <=
+        this.prepared.options.maxBlockersPerSearch / 4 &&
+      sourceChoiceCount !== targetChoiceCount &&
+      deltaX > deltaY
+    );
+  }
+
   private initializeFinePitchLayerAssignments() {
     const groups = new Map<
       string,
@@ -1016,7 +1274,6 @@ export class RipUpRubberBandSolver extends BaseSolver {
       >
     >();
     for (const demand of this.prepared.demands) {
-      if (!demand.connectionName.startsWith("source_trace_")) continue;
       for (const constraint of this.getTerminalEscapeConstraints(demand)) {
         const terminal = this.prepared.nodes[constraint.terminalNode]!;
         const groupKey =
@@ -1074,18 +1331,25 @@ export class RipUpRubberBandSolver extends BaseSolver {
       }
     }
     for (const demand of this.prepared.demands) {
-      if (
-        !["source_trace_30", "source_trace_33", "source_trace_34"].includes(
-          demand.connectionName,
-        )
-      ) {
-        continue;
+      if (!this.isShallowEscapeCorridor(demand)) continue;
+      const sourceLayer = this.prepared.nodes[demand.sourceNode]!.layer;
+      const targetLayer = this.prepared.nodes[demand.targetNode]!.layer;
+      if (sourceLayer !== targetLayer) continue;
+      this.preferredLayerByRoute.set(demand.routeId, sourceLayer);
+      const penalties =
+        this.layerPenaltyByRoute.get(demand.routeId) ??
+        new Map<string, number>();
+      for (const layer of this.prepared.layers) {
+        if (layer === sourceLayer) continue;
+        penalties.set(
+          layer,
+          Math.max(
+            penalties.get(layer) ?? 0,
+            this.prepared.options.historyIncrement * 10,
+          ),
+        );
       }
-      this.preferredLayerByRoute.set(demand.routeId, "top");
-      this.layerPenaltyByRoute.set(
-        demand.routeId,
-        new Map([["bottom", this.prepared.options.historyIncrement * 10]]),
-      );
+      this.layerPenaltyByRoute.set(demand.routeId, penalties);
     }
   }
 
@@ -1252,9 +1516,8 @@ export class RipUpRubberBandSolver extends BaseSolver {
     toNodeIndex: number,
   ) {
     if (
-      !search.isShortSignal &&
-      !search.isCorridorRoute &&
-      search.net51Segment === null
+      search.directCorridorPenaltyScale === 0 &&
+      search.protectedCorridors.length === 0
     ) {
       return 0;
     }
@@ -1281,58 +1544,39 @@ export class RipUpRubberBandSolver extends BaseSolver {
     toNodeIndex: number,
   ) {
     if (
-      !search.isShortSignal &&
-      !search.isCorridorRoute &&
-      search.net51Segment === null
+      search.directCorridorPenaltyScale === 0 &&
+      search.protectedCorridors.length === 0
     ) {
       return 0;
     }
     const from = this.prepared.nodes[fromNodeIndex]!;
     const to = this.prepared.nodes[toNodeIndex]!;
-    let shortSignalCorridorPenalty = 0;
     const source = search.sourcePoint;
     const target = search.targetPoint;
-    if (search.isShortSignal && from.layer === to.layer) {
-      const midpoint = { x: (from.x + to.x) / 2, y: (from.y + to.y) / 2 };
-      shortSignalCorridorPenalty =
-        segmentDistance(midpoint, midpoint, source, target) *
-        pointDistance(from, to) *
-        this.prepared.options.historyIncrement *
-        4;
+    if (from.layer !== to.layer) return 0;
+    const midpoint = { x: (from.x + to.x) / 2, y: (from.y + to.y) / 2 };
+    const sourceLayer = this.prepared.nodes[search.sourceNode]!.layer;
+    const directCorridorScale =
+      search.directCorridorPenaltyScale +
+      (from.layer === sourceLayer
+        ? search.preferredLayerCorridorBonusScale
+        : 0);
+    let penalty =
+      segmentDistance(midpoint, midpoint, source, target) *
+      pointDistance(from, to) *
+      this.prepared.options.historyIncrement *
+      directCorridorScale;
+    if (from.layer === sourceLayer) {
+      for (const corridor of search.protectedCorridors) {
+        const distance = segmentDistance(from, to, corridor.from, corridor.to);
+        penalty +=
+          Math.max(0, corridor.minimumDistance - distance) *
+          pointDistance(from, to) *
+          this.prepared.options.historyIncrement *
+          30;
+      }
     }
-    if (from.layer !== "top" || to.layer !== "top") {
-      return shortSignalCorridorPenalty;
-    }
-    if (search.isCorridorRoute) {
-      const midpoint = { x: (from.x + to.x) / 2, y: (from.y + to.y) / 2 };
-      const corridorDeviation = segmentDistance(
-        midpoint,
-        midpoint,
-        source,
-        target,
-      );
-      return (
-        corridorDeviation *
-        pointDistance(from, to) *
-        this.prepared.options.historyIncrement *
-        8
-      );
-    }
-    if (search.net51Segment !== null) {
-      const distance = segmentDistance(
-        from,
-        to,
-        search.net51Segment[0],
-        search.net51Segment[1],
-      );
-      return (
-        Math.max(0, 0.7 - distance) *
-        pointDistance(from, to) *
-        this.prepared.options.historyIncrement *
-        30
-      );
-    }
-    return shortSignalCorridorPenalty;
+    return penalty;
   }
 
   private nodeAllowsDemand(nodeIndex: number, demand: RouteDemand) {
@@ -2002,21 +2246,18 @@ export class RipUpRubberBandSolver extends BaseSolver {
             .sort((left, right) => {
               const shiftRank = (
                 routeId: string,
-                connectionName: string | undefined,
+                demand: RouteDemand | undefined,
               ) => {
-                if (connectionName?.startsWith("source_net_")) return 4;
+                if (demand && demand.connectionTerminalCount > 2) return 4;
                 const preferredLayer = this.preferredLayerByRoute.get(routeId);
                 if (preferredLayer && preferredLayer !== layer) return 3;
-                if (
-                  !preferredLayer &&
-                  connectionName?.startsWith("source_trace_")
-                )
+                if (!preferredLayer && demand?.connectionTerminalCount === 2)
                   return 2;
                 return preferredLayer ? 0 : 1;
               };
               return (
-                shiftRank(right.routeId, right.demand?.connectionName) -
-                  shiftRank(left.routeId, left.demand?.connectionName) ||
+                shiftRank(right.routeId, right.demand) -
+                  shiftRank(left.routeId, left.demand) ||
                 (left.demand && right.demand
                   ? pointDistance(
                       this.prepared.nodes[left.demand.sourceNode]!,
@@ -2301,6 +2542,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
       graphEdgeCount: this.prepared.edges.length,
       negotiationPassCount: this.negotiationPassCount,
       conflictRouteCount: this.lastConflictRouteCount,
+      adaptivePriorityChangeCount: this.adaptivePriorityChangeCount,
     };
   }
 

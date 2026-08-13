@@ -181,6 +181,66 @@ export const segmentDistance = (
   );
 };
 
+export const segmentToObstacleDistance = (
+  start: Point,
+  end: Point,
+  obstacle: Pick<
+    SimpleRouteJson["obstacles"][number],
+    "center" | "width" | "height" | "shape" | "ccwRotationDegrees"
+  >,
+  respectRotation = true,
+) => {
+  if (obstacle.shape === "circle") {
+    return Math.max(
+      0,
+      pointToSegmentDistance(obstacle.center, start, end) -
+        Math.max(obstacle.width, obstacle.height) / 2,
+    );
+  }
+
+  const radians =
+    (((respectRotation ? obstacle.ccwRotationDegrees : 0) ?? 0) * Math.PI) /
+    180;
+  const cosine = Math.cos(radians);
+  const sine = Math.sin(radians);
+  const toLocal = (point: Point) => {
+    const x = point.x - obstacle.center.x;
+    const y = point.y - obstacle.center.y;
+    return {
+      x: x * cosine + y * sine,
+      y: -x * sine + y * cosine,
+    };
+  };
+  const localStart = toLocal(start);
+  const localEnd = toLocal(end);
+  const halfWidth = obstacle.width / 2;
+  const halfHeight = obstacle.height / 2;
+  const bounds = {
+    minX: -halfWidth,
+    maxX: halfWidth,
+    minY: -halfHeight,
+    maxY: halfHeight,
+  };
+  if (segmentIntersectsRectInterior(localStart, localEnd, bounds)) return 0;
+
+  const corners = [
+    { x: -halfWidth, y: -halfHeight },
+    { x: halfWidth, y: -halfHeight },
+    { x: halfWidth, y: halfHeight },
+    { x: -halfWidth, y: halfHeight },
+  ];
+  return Math.min(
+    ...corners.map((corner, index) =>
+      segmentDistance(
+        localStart,
+        localEnd,
+        corner,
+        corners[(index + 1) % corners.length]!,
+      ),
+    ),
+  );
+};
+
 export const getEdgePoints = (
   prepared: PreparedBiscuitRoutingProblem,
   edge: RoutingEdge,

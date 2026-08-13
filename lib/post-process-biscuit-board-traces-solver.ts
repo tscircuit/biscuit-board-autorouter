@@ -9,6 +9,7 @@ import {
   pointsEqual,
   segmentDistance,
   segmentIntersectsRectInterior,
+  segmentToObstacleDistance,
 } from "./geometry";
 import { RipUpRubberBandSolver } from "./rip-up-rubber-band-solver";
 import type {
@@ -184,13 +185,14 @@ export const getTraceClearanceViolations = (
         ) {
           continue;
         }
-        const expanded = obstacleBounds(
-          obstacle,
-          segment.start.width / 2 + clearance,
-          respectObstacleRotation,
-        );
         if (
-          segmentIntersectsRectInterior(segment.start, segment.end, expanded)
+          segmentToObstacleDistance(
+            segment.start,
+            segment.end,
+            obstacle,
+            respectObstacleRotation,
+          ) <
+          segment.start.width / 2 + clearance - EPSILON
         ) {
           violations.push({
             kind: "obstacle",

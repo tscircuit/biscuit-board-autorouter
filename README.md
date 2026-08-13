@@ -82,6 +82,13 @@ problem-specific tuning. Run `./benchmark.sh --list` to see case IDs or
 three-minute timeout so dense inputs such as RP2040 can make meaningful
 progress without blocking the suite indefinitely.
 
+The default route order is adaptive. Before each search, the router reprioritizes
+pending demands from endpoint constraints, current occupancy, congestion
+history, and net topology. Negotiated reroutes retain their conflict-derived
+queue order. The router does not infer behavior from connection or route names.
+Supplying `routeOrder` still provides a backwards-compatible static ordering
+override.
+
 Tests include SVG matching, forced layer transitions, the
 no-prefabricated-via failure case, negotiated rip-and-replace, and the complete
 STM32 real-project repro.

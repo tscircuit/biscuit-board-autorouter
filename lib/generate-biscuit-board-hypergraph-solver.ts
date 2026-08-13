@@ -35,8 +35,10 @@ const coordinateKey = (value: number) => roundCoordinate(value).toFixed(6);
 const nodeKey = (layer: string, x: number, y: number) =>
   `${layer}:${coordinateKey(x)}:${coordinateKey(y)}`;
 
+export const DEFAULT_ROUTE_ORDER = "adaptive" as const;
+
 const DEFAULT_OPTIONS: NormalizedBiscuitBoardAutorouterOptions = {
-  routeOrder: "input",
+  routeOrder: DEFAULT_ROUTE_ORDER,
   gridPitch: 1.5,
   gridClearance: 0.2,
   respectObstacleRotationInGraph: false,
@@ -386,6 +388,7 @@ const buildDemands = (
       demands.push({
         routeId: `${connection.name}:${branchIndex++}`,
         connectionName: connection.name,
+        connectionTerminalCount: connection.pointsToConnect.length,
         allowedConnectionNames: [
           ...new Set(groupConnectionNames.get(find(connectionIndex)) ?? []),
         ],
