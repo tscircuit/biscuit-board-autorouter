@@ -29,10 +29,32 @@ interface TraceContext {
   trace: SimplifiedPcbTrace;
 }
 
-interface TraceSegment {
+export interface TraceSegment {
   start: WirePoint;
   end: WirePoint;
 }
+
+interface BoundedTraceSegment extends TraceSegment {
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+}
+
+const withSegmentBounds = (segment: TraceSegment): BoundedTraceSegment => ({
+  ...segment,
+  minX: Math.min(segment.start.x, segment.end.x),
+  minY: Math.min(segment.start.y, segment.end.y),
+  maxX: Math.max(segment.start.x, segment.end.x),
+  maxY: Math.max(segment.start.y, segment.end.y),
+});
+
+const axisGap = (
+  firstMin: number,
+  firstMax: number,
+  secondMin: number,
+  secondMax: number,
+) => Math.max(firstMin - secondMax, secondMin - firstMax, 0);
 
 const obstacleHasPcbViaId = (obstacle: SimpleRouteJson["obstacles"][number]) =>
   obstacle.connectedTo.some((id) => id.startsWith("pcb_via"));
@@ -162,7 +184,9 @@ export const getTraceClearanceViolations = (
     prepared.input,
     solution.traces,
   );
-  const segmentsByTrace = contexts.map((context) => getSegments(context.trace));
+  const segmentsByTrace = contexts.map((context) =>
+    getSegments(context.trace).map(withSegmentBounds),
+  );
   const violations: TraceClearanceViolation[] = [];
 
   for (const [contextIndex, context] of contexts.entries()) {
@@ -173,7 +197,18 @@ export const getTraceClearanceViolations = (
       ] of prepared.input.obstacles.entries()) {
         if (
           obstacle.isCopperPour ||
-          !obstacle.layers.includes(segment.start.layer) ||
+          !obstacle.layers.includes(segment.start.layer)
+        ) {
+          continue;
+        }
+        const minimumDistance = segment.start.width / 2 + clearance - EPSILON;
+        if (
+          segmentToObstacleDistance(
+            segment.start,
+            segment.end,
+            obstacle,
+            respectObstacleRotation,
+          ) >= minimumDistance ||
           obstacleAllowsSegment(
             prepared,
             context,
@@ -185,26 +220,16 @@ export const getTraceClearanceViolations = (
         ) {
           continue;
         }
-        if (
-          segmentToObstacleDistance(
-            segment.start,
-            segment.end,
-            obstacle,
-            respectObstacleRotation,
-          ) <
-          segment.start.width / 2 + clearance - EPSILON
-        ) {
-          violations.push({
-            kind: "obstacle",
-            traceId: context.trace.pcb_trace_id,
-            obstacleIndex,
-            otherId:
-              obstacle.obstacleId ??
-              obstacle.componentId ??
-              `obstacle-${obstacleIndex}`,
-            message: `Trace "${context.route.routeId}" is within ${clearance}mm of obstacle ${obstacleIndex}`,
-          });
-        }
+        violations.push({
+          kind: "obstacle",
+          traceId: context.trace.pcb_trace_id,
+          obstacleIndex,
+          otherId:
+            obstacle.obstacleId ??
+            obstacle.componentId ??
+            `obstacle-${obstacleIndex}`,
+          message: `Trace "${context.route.routeId}" is within ${clearance}mm of obstacle ${obstacleIndex}`,
+        });
       }
     }
   }
@@ -225,14 +250,30 @@ export const getTraceClearanceViolations = (
             firstSegment.start.width / 2 +
             secondSegment.start.width / 2 +
             clearance;
+          const violationDistance = minimumCenterDistance - EPSILON;
+          if (
+            axisGap(
+              firstSegment.minX,
+              firstSegment.maxX,
+              secondSegment.minX,
+              secondSegment.maxX,
+            ) >= violationDistance ||
+            axisGap(
+              firstSegment.minY,
+              firstSegment.maxY,
+              secondSegment.minY,
+              secondSegment.maxY,
+            ) >= violationDistance
+          ) {
+            continue;
+          }
           if (
             segmentDistance(
               firstSegment.start,
               firstSegment.end,
               secondSegment.start,
               secondSegment.end,
-            ) <
-            minimumCenterDistance - EPSILON
+            ) < violationDistance
           ) {
             violations.push({
               kind: "trace",
@@ -249,7 +290,7 @@ export const getTraceClearanceViolations = (
   return violations;
 };
 
-const createSegmentClearanceChecker = (
+export const createSegmentClearanceChecker = (
   prepared: PreparedBiscuitRoutingProblem,
   solution: BiscuitBoardRoutingSolution,
   traceIndex: number,
@@ -265,7 +306,7 @@ const createSegmentClearanceChecker = (
   const blockingTraceSegments = contexts.flatMap((other, otherIndex) =>
     otherIndex === traceIndex || other.demand.netId === context.demand.netId
       ? []
-      : getSegments(other.trace),
+      : getSegments(other.trace).map(withSegmentBounds),
   );
 
   return (segment: TraceSegment) => {
@@ -275,7 +316,21 @@ const createSegmentClearanceChecker = (
     ] of prepared.input.obstacles.entries()) {
       if (
         obstacle.isCopperPour ||
-        !obstacle.layers.includes(segment.start.layer) ||
+        !obstacle.layers.includes(segment.start.layer)
+      ) {
+        continue;
+      }
+      const expandedBounds = obstacleBounds(
+        obstacle,
+        segment.start.width / 2 + clearance,
+        respectObstacleRotation,
+      );
+      if (
+        !segmentIntersectsRectInterior(
+          segment.start,
+          segment.end,
+          expandedBounds,
+        ) ||
         obstacleAllowsSegment(
           prepared,
           context,
@@ -286,32 +341,40 @@ const createSegmentClearanceChecker = (
       ) {
         continue;
       }
-      if (
-        segmentIntersectsRectInterior(
-          segment.start,
-          segment.end,
-          obstacleBounds(
-            obstacle,
-            segment.start.width / 2 + clearance,
-            respectObstacleRotation,
-          ),
-        )
-      ) {
-        return false;
-      }
+      return false;
     }
+    const segmentMinX = Math.min(segment.start.x, segment.end.x);
+    const segmentMinY = Math.min(segment.start.y, segment.end.y);
+    const segmentMaxX = Math.max(segment.start.x, segment.end.x);
+    const segmentMaxY = Math.max(segment.start.y, segment.end.y);
     for (const otherSegment of blockingTraceSegments) {
       if (otherSegment.start.layer !== segment.start.layer) continue;
       const minimumCenterDistance =
         segment.start.width / 2 + otherSegment.start.width / 2 + clearance;
+      const violationDistance = minimumCenterDistance - EPSILON;
+      if (
+        axisGap(
+          segmentMinX,
+          segmentMaxX,
+          otherSegment.minX,
+          otherSegment.maxX,
+        ) >= violationDistance ||
+        axisGap(
+          segmentMinY,
+          segmentMaxY,
+          otherSegment.minY,
+          otherSegment.maxY,
+        ) >= violationDistance
+      ) {
+        continue;
+      }
       if (
         segmentDistance(
           segment.start,
           segment.end,
           otherSegment.start,
           otherSegment.end,
-        ) <
-        minimumCenterDistance - EPSILON
+        ) < violationDistance
       ) {
         return false;
       }
