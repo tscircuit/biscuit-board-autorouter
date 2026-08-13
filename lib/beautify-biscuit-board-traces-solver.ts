@@ -9,11 +9,10 @@ import {
   visualizeSimpleRouteJsonInput,
 } from "./geometry";
 import {
+  createSegmentClearanceChecker,
   getEffectiveTraceClearance,
   getTraceClearanceViolations,
   postProcessBiscuitBoardTraces,
-  traceRouteHasClearance,
-  traceSegmentsHaveClearance,
 } from "./post-process-biscuit-board-traces-solver";
 import type {
   BiscuitBoardRoutingSolution,
@@ -282,7 +281,7 @@ const createParallelConsolidationCandidate = (
   route: SimplifiedPcbTrace["route"],
   segment: IndexedWireSegment,
   anchor: IndexedWireSegment,
-  clearance: number,
+  routeHasClearance: (route: SimplifiedPcbTrace["route"]) => boolean,
 ): ConsolidationCandidate | null => {
   if (segment.start.layer !== anchor.start.layer) return null;
   const anchorVector = subtract(anchor.end, anchor.start);
@@ -368,15 +367,7 @@ const createParallelConsolidationCandidate = (
     ...route.slice(segment.endRouteIndex + 1),
   ]);
   if (routeGeometryEqual(route, candidateRoute)) return null;
-  if (
-    !traceRouteHasClearance(
-      prepared,
-      solution,
-      traceIndex,
-      candidateRoute,
-      clearance,
-    )
-  ) {
+  if (!routeHasClearance(candidateRoute)) {
     return null;
   }
 
@@ -406,6 +397,18 @@ const consolidateSameNetTraces = (
     for (let traceIndex = 0; traceIndex < traces.length; traceIndex++) {
       const route = traces[traceIndex]!.route;
       let best: ConsolidationCandidate | null = null;
+      const workingSolution = { ...solution, traces };
+      const segmentHasClearance = createSegmentClearanceChecker(
+        prepared,
+        workingSolution,
+        traceIndex,
+        clearance,
+      );
+      const routeHasClearance = (candidateRoute: SimplifiedPcbTrace["route"]) =>
+        getIndexedWireSegments({
+          ...traces[traceIndex]!,
+          route: candidateRoute,
+        }).every(segmentHasClearance);
 
       for (let anchorIndex = 0; anchorIndex < traces.length; anchorIndex++) {
         if (
@@ -497,16 +500,7 @@ const consolidateSameNetTraces = (
               ...route.slice(second.routeIndex + 1),
             ]);
             if (routeGeometryEqual(route, candidateRoute)) continue;
-            const workingSolution = { ...solution, traces };
-            if (
-              !traceRouteHasClearance(
-                prepared,
-                workingSolution,
-                traceIndex,
-                candidateRoute,
-                clearance,
-              )
-            ) {
+            if (!routeHasClearance(candidateRoute)) {
               continue;
             }
 
@@ -519,7 +513,6 @@ const consolidateSameNetTraces = (
           }
         }
 
-        const workingSolution = { ...solution, traces };
         for (const segment of getIndexedWireSegments(traces[traceIndex]!)) {
           for (const anchorSegment of getIndexedWireSegments(
             traces[anchorIndex]!,
@@ -531,7 +524,7 @@ const consolidateSameNetTraces = (
               route,
               segment,
               anchorSegment,
-              clearance,
+              routeHasClearance,
             );
             if (candidate) {
               best = chooseBetterConsolidationCandidate(best, candidate);
@@ -645,6 +638,13 @@ const chamferTraceCorners = (
 
   for (let traceIndex = 0; traceIndex < traces.length; traceIndex++) {
     let route = traces[traceIndex]!.route;
+    const workingSolution = { ...solution, traces };
+    const segmentHasClearance = createSegmentClearanceChecker(
+      prepared,
+      workingSolution,
+      traceIndex,
+      clearance,
+    );
     for (let cornerIndex = 1; cornerIndex < route.length - 1; cornerIndex++) {
       const previous = route[cornerIndex - 1]!;
       const corner = route[cornerIndex]!;
@@ -665,14 +665,9 @@ const chamferTraceCorners = (
         Math.hypot(previous.x - corner.x, previous.y - corner.y),
         Math.hypot(next.x - corner.x, next.y - corner.y),
       );
-      const workingSolution = { ...solution, traces };
       const candidateIsClear = (distance: number) =>
-        traceSegmentsHaveClearance(
-          prepared,
-          workingSolution,
-          traceIndex,
-          createChamferSegments(route, cornerIndex, distance),
-          clearance,
+        createChamferSegments(route, cornerIndex, distance).every(
+          segmentHasClearance,
         );
 
       let bestDistance = 0;

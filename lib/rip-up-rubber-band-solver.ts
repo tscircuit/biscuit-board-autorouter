@@ -22,6 +22,8 @@ import type {
 
 interface SearchNode {
   graphNode: number;
+  stateKey: number;
+  blockerState: number;
   g: number;
   parentIndex: number;
   blockers: string[];
@@ -38,6 +40,7 @@ interface ActiveSearch {
   sourceNode: number;
   targetNodes: Set<number>;
   targetTreesByLayer: Map<string, TargetKdNode | null>;
+  targetHeuristicGeneration: number;
   nodes: SearchNode[];
   open: MinHeap<number>;
   bestCostByState: Map<number, number>;
@@ -56,6 +59,13 @@ interface ActiveSearch {
   targetPoint: Point;
   directCorridorPenaltyScale: number;
   preferredLayerCorridorBonusScale: number;
+  nodeAllowanceCache: Uint8Array;
+  edgeAllowanceCache: Uint8Array;
+  foreignOwnersByEdge: Map<number, string[]>;
+  escapeTraversalCache: Uint8Array | undefined;
+  fanoutPenaltyCache: Float64Array | undefined;
+  geometryPenaltyCache: Float64Array | undefined;
+  nominalObstaclePenaltyCache: Float64Array | undefined;
   protectedCorridors: Array<{
     from: Point;
     to: Point;
@@ -255,6 +265,9 @@ export class RipUpRubberBandSolver extends BaseSolver {
   private readonly ownedNodeCountByNet = new Map<string, Map<number, number>>();
   private readonly effectiveClearance: number;
   private readonly routingScale: number;
+  private readonly targetHeuristicByNode: Float64Array;
+  private readonly targetHeuristicGenerationByNode: Uint32Array;
+  private targetHeuristicGeneration = 0;
   private committedFixedViaTransitionCount = 0;
   private activeSearch: ActiveSearch | null = null;
   private connectivityRepairCount = 0;
@@ -274,6 +287,10 @@ export class RipUpRubberBandSolver extends BaseSolver {
     this.routingScale = Math.hypot(
       prepared.input.bounds.maxX - prepared.input.bounds.minX,
       prepared.input.bounds.maxY - prepared.input.bounds.minY,
+    );
+    this.targetHeuristicByNode = new Float64Array(prepared.nodes.length);
+    this.targetHeuristicGenerationByNode = new Uint32Array(
+      prepared.nodes.length,
     );
     this.historyCostByEdge = new Float64Array(prepared.edges.length);
     this.historyCostByNode = new Float64Array(prepared.nodes.length);
@@ -603,8 +620,21 @@ export class RipUpRubberBandSolver extends BaseSolver {
         buildTargetKdTree(points),
       ]),
     );
+    this.targetHeuristicGeneration = (this.targetHeuristicGeneration + 1) >>> 0;
+    if (this.targetHeuristicGeneration === 0) {
+      this.targetHeuristicGenerationByNode.fill(0);
+      this.targetHeuristicGeneration = 1;
+    }
+    const targetHeuristicGeneration = this.targetHeuristicGeneration;
     const open = new MinHeap<number>();
-    open.push(this.heuristicToTargets(sourceNode, targetTreesByLayer), 0);
+    open.push(
+      this.heuristicToTargets(
+        sourceNode,
+        targetTreesByLayer,
+        targetHeuristicGeneration,
+      ),
+      0,
+    );
     const preferredLayer = this.preferredLayerByRoute.get(demand.routeId);
     const sourceVisitedPreferredLayer =
       preferredLayer === undefined ||
@@ -646,6 +676,30 @@ export class RipUpRubberBandSolver extends BaseSolver {
       );
       return [{ from, to, minimumDistance }];
     });
+    const directCorridorPenaltyScale =
+      demand.connectionTerminalCount === 2 &&
+      escapeConstraints.length > 0 &&
+      directDistance <= 10 &&
+      !this.requiredPrefabViaIdsByRoute.has(demand.routeId)
+        ? 4
+        : 0;
+    const preferredLayerCorridorBonusScale = isShallowEscapeCorridor
+      ? this.requiredPrefabViaIdsByRoute.has(demand.routeId)
+        ? 8
+        : 4
+      : 0;
+    const hasGeometryPenalty =
+      directCorridorPenaltyScale !== 0 || protectedCorridors.length > 0;
+    const hasNominalObstaclePenalty =
+      (demand.nominalWidth ?? demand.width) > demand.width + 1e-7;
+    const initialStateKey = this.stateKey(
+      sourceNode,
+      null,
+      collapseBlockerStates ? 3 : 0,
+      sourceVisitedPreferredLayer,
+      0,
+      0,
+    );
     return {
       demand,
       allowBlockers,
@@ -653,9 +707,12 @@ export class RipUpRubberBandSolver extends BaseSolver {
       sourceNode,
       targetNodes,
       targetTreesByLayer,
+      targetHeuristicGeneration,
       nodes: [
         {
           graphNode: sourceNode,
+          stateKey: initialStateKey,
+          blockerState: collapseBlockerStates ? 3 : 0,
           g: 0,
           parentIndex: -1,
           blockers: [],
@@ -666,20 +723,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
         },
       ],
       open,
-      bestCostByState: new Map([
-        [
-          this.stateKey(
-            sourceNode,
-            null,
-            [],
-            collapseBlockerStates,
-            sourceVisitedPreferredLayer,
-            0,
-            0,
-          ),
-          0,
-        ],
-      ]),
+      bestCostByState: new Map([[initialStateKey, 0]]),
       expanded: 0,
       requiredPrefabViaIds,
       requiredViaCount: requiredPrefabViaIds.length,
@@ -697,18 +741,25 @@ export class RipUpRubberBandSolver extends BaseSolver {
         this.prepared.options.ripCost * (this.negotiationPassCount + 1) ** 2,
       sourcePoint,
       targetPoint,
-      directCorridorPenaltyScale:
-        demand.connectionTerminalCount === 2 &&
-        escapeConstraints.length > 0 &&
-        directDistance <= 10 &&
-        !this.requiredPrefabViaIdsByRoute.has(demand.routeId)
-          ? 4
-          : 0,
-      preferredLayerCorridorBonusScale: isShallowEscapeCorridor
-        ? this.requiredPrefabViaIdsByRoute.has(demand.routeId)
-          ? 8
-          : 4
-        : 0,
+      directCorridorPenaltyScale,
+      preferredLayerCorridorBonusScale,
+      nodeAllowanceCache: this.getNodeAllowanceCache(demand),
+      edgeAllowanceCache: this.getEdgeAllowanceCache(demand),
+      foreignOwnersByEdge: new Map(),
+      escapeTraversalCache:
+        escapeConstraints.length > 0
+          ? this.getByteCache(this.escapeTraversalByDemand, demand)
+          : undefined,
+      fanoutPenaltyCache:
+        escapeConstraints.length > 0
+          ? this.getPenaltyCache(this.fanoutPenaltyByDemand, demand)
+          : undefined,
+      geometryPenaltyCache: hasGeometryPenalty
+        ? this.getPenaltyCache(this.geometryPenaltyByDemand, demand)
+        : undefined,
+      nominalObstaclePenaltyCache: hasNominalObstaclePenalty
+        ? this.getPenaltyCache(this.nominalObstaclePenaltyByDemand, demand)
+        : undefined,
       protectedCorridors,
     };
   }
@@ -751,8 +802,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
   private stateKey(
     graphNode: number,
     edgeFromParent: number | null,
-    blockers: readonly string[],
-    collapseBlockerStates = false,
+    blockerState: number,
     visitedPreferredLayer = true,
     requiredViaIndex = 0,
     requiredGuideIndex = 0,
@@ -768,11 +818,6 @@ export class RipUpRubberBandSolver extends BaseSolver {
           : this.prepared.edges[edgeFromParent]!.kind === "trace"
             ? 2
             : 3;
-    const blockerState = collapseBlockerStates
-      ? 3
-      : blockers.length === 0
-        ? 0
-        : 1 + blockerSetHash(blockers);
     return (
       ((((graphNode * 4 + arrivalKind) * 4 + blockerState) * 2 +
         (visitedPreferredLayer ? 1 : 0)) *
@@ -795,7 +840,11 @@ export class RipUpRubberBandSolver extends BaseSolver {
   private heuristicToTargets(
     fromNode: number,
     targetTreesByLayer: ActiveSearch["targetTreesByLayer"],
+    cacheGeneration: number,
   ) {
+    if (this.targetHeuristicGenerationByNode[fromNode] === cacheGeneration) {
+      return this.targetHeuristicByNode[fromNode]!;
+    }
     const from = this.prepared.nodes[fromNode]!;
     let best = Number.POSITIVE_INFINITY;
     for (const [layer, tree] of targetTreesByLayer) {
@@ -808,6 +857,8 @@ export class RipUpRubberBandSolver extends BaseSolver {
           (layer === from.layer ? 0 : this.prepared.options.viaTransitionCost),
       );
     }
+    this.targetHeuristicByNode[fromNode] = best;
+    this.targetHeuristicGenerationByNode[fromNode] = cacheGeneration;
     return best;
   }
 
@@ -841,17 +892,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
       return;
     }
     const current = search.nodes[searchNodeIndex]!;
-    const bestCost = search.bestCostByState.get(
-      this.stateKey(
-        current.graphNode,
-        current.edgeFromParent,
-        current.blockers,
-        search.collapseBlockerStates,
-        current.visitedPreferredLayer,
-        current.requiredViaIndex,
-        current.requiredGuideIndex,
-      ),
-    );
+    const bestCost = search.bestCostByState.get(current.stateKey);
     if (bestCost === undefined || current.g > bestCost + 1e-9) return;
     search.expanded++;
     this.totalExpandedStateCount++;
@@ -949,11 +990,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
     if (search.escapeConstraints.length > 0) {
       // The escape verdict is symmetric in (from, to), so it caches per
       // undirected edge.
-      let traversalCache = this.escapeTraversalByDemand.get(search.demand);
-      if (!traversalCache) {
-        traversalCache = new Uint8Array(this.prepared.edges.length);
-        this.escapeTraversalByDemand.set(search.demand, traversalCache);
-      }
+      const traversalCache = search.escapeTraversalCache!;
       let verdict = traversalCache[edgeId]!;
       if (verdict === 0) {
         verdict = this.traversalFollowsTerminalEscapes(
@@ -967,8 +1004,12 @@ export class RipUpRubberBandSolver extends BaseSolver {
       }
       if (verdict === 2) return;
     }
-    if (!this.nodeAllowsDemand(toNode, search.demand)) return;
-    if (!this.edgeAllowsDemand(edge, search.demand)) return;
+    if (
+      !this.nodeAllowsDemand(toNode, search.demand, search.nodeAllowanceCache)
+    )
+      return;
+    if (!this.edgeAllowsDemand(edge, search.demand, search.edgeAllowanceCache))
+      return;
     const reservedGuideOwner = this.reservedGuideOwnerByEdgeId.get(edgeId);
     if (
       reservedGuideOwner !== undefined &&
@@ -977,7 +1018,11 @@ export class RipUpRubberBandSolver extends BaseSolver {
       return;
     }
 
-    const foreignOwners = this.getForeignOwners(edge, search.demand);
+    let foreignOwners = search.foreignOwnersByEdge.get(edgeId);
+    if (foreignOwners === undefined) {
+      foreignOwners = this.getForeignOwners(edge, search.demand);
+      search.foreignOwnersByEdge.set(edgeId, foreignOwners);
+    }
     if (!search.allowBlockers && foreignOwners.length > 0) return;
     if (
       foreignOwners.some(
@@ -1002,6 +1047,11 @@ export class RipUpRubberBandSolver extends BaseSolver {
         ? foreignOwners.filter((routeId) => !parent.blockers.includes(routeId))
             .length
         : 0;
+    const blockerState = search.collapseBlockerStates
+      ? 3
+      : hasNewBlockers
+        ? 1 + blockerSetHash(nextBlockers)
+        : parent.blockerState;
     const nextG =
       parent.g +
       edge.cost +
@@ -1019,13 +1069,17 @@ export class RipUpRubberBandSolver extends BaseSolver {
             toNode,
           )
         : 0) +
-      this.getRouteGeometryPenaltyCached(
-        search,
-        edgeId,
-        parent.graphNode,
-        toNode,
-      ) +
-      this.getNominalObstaclePenaltyCached(search.demand, edgeId) +
+      (search.geometryPenaltyCache
+        ? this.getRouteGeometryPenaltyCached(
+            search,
+            edgeId,
+            parent.graphNode,
+            toNode,
+          )
+        : 0) +
+      (search.nominalObstaclePenaltyCache
+        ? this.getNominalObstaclePenaltyCached(search, edgeId)
+        : 0) +
       newlyBlockedRouteCount * search.congestionCost +
       foreignOwners.length * this.prepared.options.crossingCost;
     const visitedPreferredLayer =
@@ -1035,8 +1089,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
     const key = this.stateKey(
       toNode,
       edgeId,
-      nextBlockers,
-      search.collapseBlockerStates,
+      blockerState,
       visitedPreferredLayer,
       requiredViaIndex,
       requiredGuideIndex,
@@ -1049,6 +1102,8 @@ export class RipUpRubberBandSolver extends BaseSolver {
     const nextIndex = search.nodes.length;
     search.nodes.push({
       graphNode: toNode,
+      stateKey: key,
+      blockerState,
       g: nextG,
       parentIndex,
       blockers: nextBlockers,
@@ -1059,7 +1114,12 @@ export class RipUpRubberBandSolver extends BaseSolver {
     });
     search.bestCostByState.set(key, nextG);
     search.open.push(
-      nextG + this.heuristicToTargets(toNode, search.targetTreesByLayer),
+      nextG +
+        this.heuristicToTargets(
+          toNode,
+          search.targetTreesByLayer,
+          search.targetHeuristicGeneration,
+        ),
       nextIndex,
     );
   }
@@ -1492,11 +1552,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
   ) {
     // Both penalty helpers are pure functions of the demand and the edge's
     // endpoints, and symmetric in (from, to), so they cache per edge.
-    let cache = this.fanoutPenaltyByDemand.get(search.demand);
-    if (!cache) {
-      cache = new Float64Array(this.prepared.edges.length).fill(Number.NaN);
-      this.fanoutPenaltyByDemand.set(search.demand, cache);
-    }
+    const cache = search.fanoutPenaltyCache!;
     let penalty = cache[edgeId]!;
     if (Number.isNaN(penalty)) {
       penalty = this.getShortFanoutStraightRunPenalty(
@@ -1521,11 +1577,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
     ) {
       return 0;
     }
-    let cache = this.geometryPenaltyByDemand.get(search.demand);
-    if (!cache) {
-      cache = new Float64Array(this.prepared.edges.length).fill(Number.NaN);
-      this.geometryPenaltyByDemand.set(search.demand, cache);
-    }
+    const cache = search.geometryPenaltyCache!;
     let penalty = cache[edgeId]!;
     if (Number.isNaN(penalty)) {
       penalty = this.getRouteGeometryPenalty(
@@ -1579,12 +1631,20 @@ export class RipUpRubberBandSolver extends BaseSolver {
     return penalty;
   }
 
-  private nodeAllowsDemand(nodeIndex: number, demand: RouteDemand) {
+  private getNodeAllowanceCache(demand: RouteDemand) {
     let cache = this.nodeAllowanceByDemand.get(demand);
     if (!cache) {
       cache = new Uint8Array(this.prepared.nodes.length);
       this.nodeAllowanceByDemand.set(demand, cache);
     }
+    return cache;
+  }
+
+  private nodeAllowsDemand(
+    nodeIndex: number,
+    demand: RouteDemand,
+    cache = this.getNodeAllowanceCache(demand),
+  ) {
     const cached = cache[nodeIndex]!;
     if (cached !== 0) return cached === 1;
     const node = this.prepared.nodes[nodeIndex]!;
@@ -1601,12 +1661,20 @@ export class RipUpRubberBandSolver extends BaseSolver {
     return allowed;
   }
 
-  private edgeAllowsDemand(edge: RoutingEdge, demand: RouteDemand) {
+  private getEdgeAllowanceCache(demand: RouteDemand) {
     let cache = this.edgeAllowanceByDemand.get(demand);
     if (!cache) {
       cache = new Uint8Array(this.prepared.edges.length);
       this.edgeAllowanceByDemand.set(demand, cache);
     }
+    return cache;
+  }
+
+  private edgeAllowsDemand(
+    edge: RoutingEdge,
+    demand: RouteDemand,
+    cache = this.getEdgeAllowanceCache(demand),
+  ) {
     const cached = cache[edge.edgeId]!;
     if (cached !== 0) return cached === 1;
     const allowed = this.computeEdgeAllowsDemand(edge, demand);
@@ -1699,14 +1767,13 @@ export class RipUpRubberBandSolver extends BaseSolver {
     return true;
   }
 
-  private getNominalObstaclePenaltyCached(demand: RouteDemand, edgeId: number) {
+  private getNominalObstaclePenaltyCached(
+    search: ActiveSearch,
+    edgeId: number,
+  ) {
+    const demand = search.demand;
     const nominalWidth = demand.nominalWidth ?? demand.width;
-    if (nominalWidth <= demand.width + 1e-7) return 0;
-    let cache = this.nominalObstaclePenaltyByDemand.get(demand);
-    if (!cache) {
-      cache = new Float64Array(this.prepared.edges.length).fill(Number.NaN);
-      this.nominalObstaclePenaltyByDemand.set(demand, cache);
-    }
+    const cache = search.nominalObstaclePenaltyCache!;
     let penalty = cache[edgeId]!;
     if (!Number.isNaN(penalty)) return penalty;
     const edge = this.prepared.edges[edgeId]!;
@@ -1717,6 +1784,30 @@ export class RipUpRubberBandSolver extends BaseSolver {
         NOMINAL_OBSTACLE_PENALTY_MULTIPLIER;
     cache[edgeId] = penalty;
     return penalty;
+  }
+
+  private getByteCache(
+    caches: WeakMap<RouteDemand, Uint8Array>,
+    demand: RouteDemand,
+  ) {
+    let cache = caches.get(demand);
+    if (!cache) {
+      cache = new Uint8Array(this.prepared.edges.length);
+      caches.set(demand, cache);
+    }
+    return cache;
+  }
+
+  private getPenaltyCache(
+    caches: WeakMap<RouteDemand, Float64Array>,
+    demand: RouteDemand,
+  ) {
+    let cache = caches.get(demand);
+    if (!cache) {
+      cache = new Float64Array(this.prepared.edges.length).fill(Number.NaN);
+      caches.set(demand, cache);
+    }
+    return cache;
   }
 
   private getConflictDistances(edge: Extract<RoutingEdge, { kind: "trace" }>) {
