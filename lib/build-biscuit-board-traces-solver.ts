@@ -133,18 +133,27 @@ export const attachSameNetTraceBranches = (
         traceIndex: index,
       })),
     );
-    const firstIsConnected = treeSegments.some((segment) =>
-      pointIsOnSegment(first, segment),
+    const firstConnectedTraceIndexes = new Set(
+      treeSegments
+        .filter((segment) => pointIsOnSegment(first, segment))
+        .map((segment) => segment.traceIndex),
     );
-    const lastIsConnected = treeSegments.some((segment) =>
-      pointIsOnSegment(last, segment),
+    const lastConnectedTraceIndexes = new Set(
+      treeSegments
+        .filter((segment) => pointIsOnSegment(last, segment))
+        .map((segment) => segment.traceIndex),
     );
+    const firstIsConnected = firstConnectedTraceIndexes.size > 0;
+    const lastIsConnected = lastConnectedTraceIndexes.size > 0;
     if (firstIsConnected === lastIsConnected) {
       treeTraceIndexes.push(traceIndex);
       continue;
     }
 
     const fromStart = !firstIsConnected;
+    const connectedTraceIndexes = firstIsConnected
+      ? firstConnectedTraceIndexes
+      : lastConnectedTraceIndexes;
     const candidateSegments = getWireSegments(trace);
     const orderedSegments = fromStart
       ? candidateSegments.map((segment) => ({
@@ -173,6 +182,18 @@ export const attachSameNetTraceBranches = (
           }
         | undefined;
       for (const anchor of treeSegments) {
+        // If the connected endpoint is already on this same trace, stopping at
+        // an earlier crossing merely moves that existing attachment point.
+        if (connectedTraceIndexes.has(anchor.traceIndex)) continue;
+        // Routes that declare a shared terminal are already connected there.
+        // Their geometric crossing is not a new tree attachment opportunity.
+        if (
+          trace.connectsTo?.some((id) =>
+            traces[anchor.traceIndex]!.connectsTo?.includes(id),
+          )
+        ) {
+          continue;
+        }
         const intersection = firstIntersectionAlong(
           candidate.travelStart,
           candidate.travelEnd,
@@ -196,7 +217,6 @@ export const attachSameNetTraceBranches = (
       treeTraceIndexes.push(traceIndex);
       continue;
     }
-
     const discardedRoute = fromStart
       ? trace.route.slice(attachment.candidate.endRouteIndex)
       : trace.route.slice(0, attachment.candidate.startRouteIndex + 1);

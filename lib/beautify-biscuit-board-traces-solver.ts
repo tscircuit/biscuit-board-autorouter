@@ -231,14 +231,41 @@ const parallelCorridorIsEmpty = (
   prepared: PreparedBiscuitRoutingProblem,
   solution: BiscuitBoardRoutingSolution,
   traceIndex: number,
+  anchorTraceIndex: number,
   layer: string,
   corridor: Point[],
 ) => {
+  const connectedIds = new Set(solution.traces[traceIndex]!.connectsTo ?? []);
+  const anchorConnectedIds = new Set(
+    solution.traces[anchorTraceIndex]!.connectsTo ?? [],
+  );
+  const traceEndpoints = [
+    solution.traces[traceIndex]!.route[0],
+    solution.traces[traceIndex]!.route.at(-1),
+  ].filter((point): point is WirePoint => point?.route_type === "wire");
+  const anchorEndpoints = [
+    solution.traces[anchorTraceIndex]!.route[0],
+    solution.traces[anchorTraceIndex]!.route.at(-1),
+  ].filter((point): point is WirePoint => point?.route_type === "wire");
   for (const obstacle of prepared.input.obstacles) {
+    const bounds = obstacleBounds(obstacle);
+    const hasSharedEndpoint = traceEndpoints.some(
+      (endpoint) =>
+        pointIsInRect(endpoint, bounds) &&
+        anchorEndpoints.some(
+          (anchorEndpoint) =>
+            anchorEndpoint.layer === endpoint.layer &&
+            pointsEqual(anchorEndpoint, endpoint),
+        ),
+    );
     if (
       obstacle.isCopperPour ||
+      (hasSharedEndpoint &&
+        obstacle.connectedTo.some(
+          (id) => connectedIds.has(id) && anchorConnectedIds.has(id),
+        )) ||
       !obstacle.layers.includes(layer) ||
-      !corridorIntersectsRect(corridor, obstacleBounds(obstacle))
+      !corridorIntersectsRect(corridor, bounds)
     ) {
       continue;
     }
@@ -279,6 +306,7 @@ const createParallelConsolidationCandidate = (
   prepared: PreparedBiscuitRoutingProblem,
   solution: BiscuitBoardRoutingSolution,
   traceIndex: number,
+  anchorTraceIndex: number,
   route: SimplifiedPcbTrace["route"],
   segment: IndexedWireSegment,
   anchor: IndexedWireSegment,
@@ -347,6 +375,7 @@ const createParallelConsolidationCandidate = (
       prepared,
       solution,
       traceIndex,
+      anchorTraceIndex,
       segment.start.layer,
       corridor,
     )
@@ -528,6 +557,7 @@ const consolidateSameNetTraces = (
               prepared,
               workingSolution,
               traceIndex,
+              anchorIndex,
               route,
               segment,
               anchorSegment,

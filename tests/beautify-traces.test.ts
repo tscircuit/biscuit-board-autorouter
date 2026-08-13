@@ -325,6 +325,60 @@ test("beautification combines unobstructed parallel same-net spans", () => {
   }
 });
 
+test("a connected same-net pad does not block parallel consolidation", () => {
+  const input: SimpleRouteJson = {
+    bounds: { minX: 0, minY: 0, maxX: 10, maxY: 8 },
+    layerCount: 1,
+    minTraceWidth: 0.1,
+    obstacles: [
+      {
+        type: "rect",
+        center: { x: 1, y: 3.75 },
+        width: 0.5,
+        height: 1.5,
+        layers: ["top"],
+        connectedTo: ["shared-pad"],
+      },
+    ],
+    connections: [
+      {
+        name: "outer-ground",
+        netConnectionName: "GND",
+        pointsToConnect: [
+          { x: 1, y: 3, layer: "top", pointId: "shared-pad" },
+          { x: 9, y: 4, layer: "top", pointId: "outer-right" },
+        ],
+      },
+      {
+        name: "inner-ground",
+        netConnectionName: "GND",
+        pointsToConnect: [
+          { x: 1, y: 3, layer: "top", pointId: "shared-pad" },
+          { x: 8, y: 5, layer: "top", pointId: "inner-right" },
+        ],
+      },
+    ],
+  };
+  const { prepared, solution } = createSolution(input, [
+    [
+      { x: 1, y: 3 },
+      { x: 1, y: 4 },
+      { x: 9, y: 4 },
+    ],
+    [
+      { x: 1, y: 3 },
+      { x: 1, y: 5 },
+      { x: 8, y: 5 },
+    ],
+  ]);
+
+  const beautified = beautifyBiscuitBoardTraces(prepared, solution);
+
+  expect(
+    getLongestSharedHorizontalRun(beautified.traces[0]!, beautified.traces[1]!),
+  ).toBeGreaterThan(3.9);
+});
+
 for (const [blocker, blockerLabel] of [
   ["obstacle", "an obstacle"],
   ["foreign-trace", "a foreign trace"],

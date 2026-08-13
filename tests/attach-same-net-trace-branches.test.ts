@@ -60,10 +60,14 @@ const makeSolution = (
 
 test("adds an unconnected branch only as far as existing same-net copper", () => {
   const solution = makeSolution(
-    [route("tree", "gnd"), route("branch", "gnd")],
+    [route("connection", "gnd"), route("tree", "gnd"), route("branch", "gnd")],
     [
-      trace("tree", [
+      trace("connection", [
         [0, 0],
+        [1, 0],
+      ]),
+      trace("tree", [
+        [1, 0],
         [4, 0],
       ]),
       trace("branch", [
@@ -77,9 +81,9 @@ test("adds an unconnected branch only as far as existing same-net copper", () =>
   const output = attachSameNetTraceBranches(solution);
 
   expect(output.stats.sameNetTreeAttachmentCount).toBe(1);
-  expect(output.traces[0]!.route).toEqual([wire(0, 0), wire(2, 0), wire(4, 0)]);
-  expect(output.traces[1]!.route).toEqual([wire(2, 0), wire(2, -2)]);
-  expect(solution.traces[0]!.route).toEqual([wire(0, 0), wire(4, 0)]);
+  expect(output.traces[1]!.route).toEqual([wire(1, 0), wire(2, 0), wire(4, 0)]);
+  expect(output.traces[2]!.route).toEqual([wire(2, 0), wire(2, -2)]);
+  expect(solution.traces[1]!.route).toEqual([wire(1, 0), wire(4, 0)]);
 });
 
 test("does not attach branches to copper from another net", () => {
@@ -95,6 +99,58 @@ test("does not attach branches to copper from another net", () => {
         [2, 2],
         [2, -2],
       ]),
+    ],
+  );
+
+  const output = attachSameNetTraceBranches(solution);
+
+  expect(output.stats.sameNetTreeAttachmentCount).toBeUndefined();
+  expect(output.traces).toEqual(solution.traces);
+});
+
+test("does not move an endpoint already attached to the crossing trace", () => {
+  const solution = makeSolution(
+    [route("tree", "gnd"), route("branch", "gnd")],
+    [
+      trace("tree", [
+        [2, 0],
+        [0, 2],
+        [2, 2],
+      ]),
+      trace("branch", [
+        [0, 0],
+        [2, 2],
+      ]),
+    ],
+  );
+
+  const output = attachSameNetTraceBranches(solution);
+
+  expect(output.stats.sameNetTreeAttachmentCount).toBeUndefined();
+  expect(output.traces).toEqual(solution.traces);
+});
+
+test("does not add a crossing junction between routes sharing a terminal", () => {
+  const anchor = trace("tree", [
+    [1, 0],
+    [4, 0],
+  ]);
+  const branch = trace("branch", [
+    [0, 0],
+    [2, 2],
+    [2, -2],
+  ]);
+  anchor.connectsTo = ["shared-terminal"];
+  branch.connectsTo = ["shared-terminal"];
+  const solution = makeSolution(
+    [route("connection", "gnd"), route("tree", "gnd"), route("branch", "gnd")],
+    [
+      trace("connection", [
+        [0, 0],
+        [1, 0],
+      ]),
+      anchor,
+      branch,
     ],
   );
 

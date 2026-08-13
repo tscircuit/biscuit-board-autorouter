@@ -9,6 +9,7 @@ const input = capturedInput as SimpleRouteJson;
 const C_MCU_GND = { id: "pcb_port_199", x: 12.5, y: 1.9125 };
 const C_NRST_GND = { id: "pcb_port_201", x: 14, y: 6.9125 };
 const D_PWR_GND = { id: "pcb_port_207", x: 9.325, y: 15 };
+const DISPLAY_GND = { id: "pcb_port_153", x: 5.86, y: -3.49 };
 const GND_VIA = { id: "pcb_via_12", x: 12.75, y: 19.5 };
 const VIEWBOX_MARKER_LABEL = "redundant GND branch snapshot viewbox";
 
@@ -108,6 +109,10 @@ test("attaches the D_PWR GND branch to existing same-net copper", async () => {
   expect(solver.solved).toBe(true);
   const output = solver.getOutput()!;
   expect(output.traces).toHaveLength(33);
+  const built = solver.getStageOutput("build-and-validate-traces")!;
+  expect(built.sameNetTreeJunctions).toEqual([
+    { x: GND_VIA.x, y: 11.575, layer: "top" },
+  ]);
 
   const traceWith = (...ids: string[]) =>
     output.traces.find((trace) =>
@@ -150,7 +155,33 @@ test("attaches the D_PWR GND branch to existing same-net copper", async () => {
     y: D_PWR_GND.y,
     layer: "top",
   });
-  expect(output.stats.sameNetTreeAttachmentCount).toBeGreaterThan(0);
+  expect(output.stats.sameNetTreeAttachmentCount).toBe(1);
+
+  const displayGroundTraces = output.traces.filter((trace) =>
+    trace.connectsTo?.includes(DISPLAY_GND.id),
+  );
+  expect(displayGroundTraces).toHaveLength(2);
+  const displayPadExit = [0, 1] as const;
+  expect(
+    displayGroundTraces.map((trace) =>
+      displayPadExit.map((index) => {
+        const point = trace.route.filter(
+          (routePoint): routePoint is WirePoint =>
+            routePoint.route_type === "wire",
+        )[index];
+        return point ? { x: point.x, y: point.y } : undefined;
+      }),
+    ),
+  ).toEqual([
+    [
+      { x: DISPLAY_GND.x, y: DISPLAY_GND.y },
+      { x: 4.975, y: DISPLAY_GND.y },
+    ],
+    [
+      { x: DISPLAY_GND.x, y: DISPLAY_GND.y },
+      { x: 4.975, y: DISPLAY_GND.y },
+    ],
+  ]);
 
   const graphics = solver.visualize();
   const annotatedGraphics = {
