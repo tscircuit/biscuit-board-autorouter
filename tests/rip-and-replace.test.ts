@@ -70,6 +70,7 @@ test("rips a chokepoint route and requeues it onto a clear corridor", () => {
     {
       routeId: "a-flexible",
       connectionName: "a-flexible",
+      connectionTerminalCount: 2,
       netId: "a-flexible",
       sourceNode: 0,
       targetNode: 2,
@@ -78,6 +79,7 @@ test("rips a chokepoint route and requeues it onto a clear corridor", () => {
     {
       routeId: "b-chokepoint",
       connectionName: "b-chokepoint",
+      connectionTerminalCount: 2,
       netId: "b-chokepoint",
       sourceNode: 5,
       targetNode: 6,
@@ -178,6 +180,7 @@ test("indexes occupied conflict edges without requiring a shared node", () => {
     {
       routeId: "a-flexible",
       connectionName: "a-flexible",
+      connectionTerminalCount: 2,
       netId: "a-flexible",
       sourceNode: 0,
       targetNode: 1,
@@ -186,6 +189,7 @@ test("indexes occupied conflict edges without requiring a shared node", () => {
     {
       routeId: "b-crossing",
       connectionName: "b-crossing",
+      connectionTerminalCount: 2,
       netId: "b-crossing",
       sourceNode: 4,
       targetNode: 5,

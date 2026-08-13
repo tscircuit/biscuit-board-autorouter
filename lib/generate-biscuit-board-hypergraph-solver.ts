@@ -35,8 +35,10 @@ const coordinateKey = (value: number) => roundCoordinate(value).toFixed(6);
 const nodeKey = (layer: string, x: number, y: number) =>
   `${layer}:${coordinateKey(x)}:${coordinateKey(y)}`;
 
+export const DEFAULT_ROUTE_ORDER = "adaptive" as const;
+
 const DEFAULT_OPTIONS: NormalizedBiscuitBoardAutorouterOptions = {
-  routeOrder: "input",
+  routeOrder: DEFAULT_ROUTE_ORDER,
   gridPitch: 1.5,
   gridClearance: 0.2,
   respectObstacleRotationInGraph: false,
@@ -55,37 +57,10 @@ type HypergraphGenerationOptions = NormalizedBiscuitBoardAutorouterOptions & {
   exactRotatedObstacleIndexes: ReadonlySet<number>;
 };
 
-const DENSE_BOARD_DEMAND_THRESHOLD = 64;
-
-export const selectDefaultRouteOrder = (
-  input: Pick<SimpleRouteJson, "connections">,
-): NormalizedBiscuitBoardAutorouterOptions["routeOrder"] => {
-  let demandCount = 0;
-  let signalDemandCount = 0;
-  for (const connection of input.connections) {
-    const connectionDemandCount = Math.max(
-      0,
-      connection.pointsToConnect.length - 1,
-    );
-    demandCount += connectionDemandCount;
-    if (connection.name.startsWith("source_trace_")) {
-      signalDemandCount += connectionDemandCount;
-    }
-  }
-  return demandCount >= DENSE_BOARD_DEMAND_THRESHOLD && signalDemandCount > 0
-    ? "signal_longest_first"
-    : "input";
-};
-
 const normalizeOptions = (
-  input: SimpleRouteJson,
   options: BiscuitBoardAutorouterOptions = {},
 ): NormalizedBiscuitBoardAutorouterOptions => {
-  const normalized = {
-    ...DEFAULT_OPTIONS,
-    ...options,
-    routeOrder: options.routeOrder ?? selectDefaultRouteOrder(input),
-  };
+  const normalized = { ...DEFAULT_OPTIONS, ...options };
   for (const key of [
     "gridPitch",
     "viaTransitionCost",
@@ -413,6 +388,7 @@ const buildDemands = (
       demands.push({
         routeId: `${connection.name}:${branchIndex++}`,
         connectionName: connection.name,
+        connectionTerminalCount: connection.pointsToConnect.length,
         allowedConnectionNames: [
           ...new Set(groupConnectionNames.get(find(connectionIndex)) ?? []),
         ],
@@ -538,7 +514,7 @@ const buildBiscuitBoardHypergraph = (
   ) {
     throw new Error("routing bounds must have positive width and height");
   }
-  const normalizedOptions = normalizeOptions(input, rawOptions);
+  const normalizedOptions = normalizeOptions(rawOptions);
   const options: HypergraphGenerationOptions = {
     ...normalizedOptions,
     exactRotatedObstacleIndexes,

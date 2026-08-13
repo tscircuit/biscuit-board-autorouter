@@ -11,10 +11,11 @@ export interface RectBounds {
 
 export interface BiscuitBoardAutorouterOptions {
   /**
-   * Demand ordering override. When omitted, dense boards with signal traces
-   * route signals longest-first; smaller boards preserve input order.
+   * Demand ordering override. When omitted, demand priority adapts to the
+   * current routing topology, occupancy, and congestion history.
    */
   routeOrder?:
+    | "adaptive"
     | "longest_first"
     | "shortest_first"
     | "signal_longest_first"
@@ -39,6 +40,7 @@ export interface BiscuitBoardAutorouterOptions {
 
 export interface NormalizedBiscuitBoardAutorouterOptions {
   routeOrder:
+    | "adaptive"
     | "longest_first"
     | "shortest_first"
     | "signal_longest_first"
@@ -100,6 +102,8 @@ export interface RoutingAdjacency {
 export interface RouteDemand {
   routeId: string;
   connectionName: string;
+  /** Number of terminals in the originating connection. */
+  connectionTerminalCount: number;
   allowedConnectionNames?: string[];
   netId: string;
   sourceNode: number;
@@ -155,6 +159,7 @@ export interface BiscuitBoardRoutingStats {
   graphEdgeCount: number;
   negotiationPassCount?: number;
   conflictRouteCount?: number;
+  adaptivePriorityChangeCount?: number;
   postProcessedClearance?: number;
   preSimplificationSegmentCount?: number;
   postSimplificationSegmentCount?: number;
