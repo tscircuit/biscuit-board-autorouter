@@ -104,6 +104,40 @@ portion and its green overlay marks the portion still needed to reach the via.
 - Input: 15 merged connections, 157 obstacles, 2 layers, 34 routing demands,
   and 51 assignable prefabricated vias
 
+## Repro 07 · RP2040 C_FLASH route underneath U_FLASH
+
+- Source: `tscircuit/biscuit-boards` at
+  `c54d58c602344c2b0c3cd739417b7364081bd39c`
+- Circuit: `examples/rp2040-photodiode-crystal-buttons.tsx`
+- Capture point: the normalized `SimpleRouteJson` passed to the board's
+  `autorouter.algorithmFn`
+- Input: 28 merged connections, 209 obstacles, 2 layers, and 82 routing
+  demands
+
+The GND route between `C_FLASH` and `U_FLASH` crosses the flash chip's body
+area. The full routing pipeline completes and its trace-clearance check reports
+no violations. The SVG regression test overlays the `U_FLASH` body outline and
+snapshots an exact 10 mm square centered on `C_FLASH`, providing 5 mm of
+context on every side.
+
+## Repro 08 · STM32 stepper stray traces
+
+- Source: `tscircuit/biscuit-boards` at
+  `c54d58c602344c2b0c3cd739417b7364081bd39c`
+- Autorouter revision used by that source:
+  `a704ab5d6f9693924fe716710c57a7787fe943f4`
+- Circuit: `examples/stm32-stepper-biscuit-board.tsx`
+- Capture point: the normalized `SimpleRouteJson` passed to
+  `BiscuitBoardAutorouter`
+- Input: 28 merged connections, 175 obstacles, 2 layers, and 69 routing
+  demands
+
+The routing pipeline reports success, but a `source_net_1` top-layer branch
+ends at `(-15.8, 18.5375)`. That endpoint is neither a requested electrical
+terminal nor a junction on another `source_net_1` trace, leaving visible copper
+that connects to nothing. The regression test verifies that exact dangling
+endpoint and snapshots the prefabricated-via area shown in the original report.
+
 ## Headless benchmark suite
 
 `./benchmark.sh` runs Repros 01, 02, 03, and 06. Every case intentionally
