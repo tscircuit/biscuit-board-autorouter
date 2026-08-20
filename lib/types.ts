@@ -34,6 +34,11 @@ export interface BiscuitBoardAutorouterOptions {
   maxTotalRips?: number;
   maxSearchStates?: number;
   expansionsPerStep?: number;
+  /**
+   * Conflict-index worker threads. Zero selects an automatic bounded count,
+   * one disables parallelism, and values above one set the maximum.
+   */
+  conflictWorkerCount?: number;
   /** Expand routed copper toward its nominal width after clearance cleanup. */
   expandTraces?: boolean;
   /** Keep completed stage solvers and outputs for debugger visualization. */
@@ -59,6 +64,7 @@ export interface NormalizedBiscuitBoardAutorouterOptions {
   maxTotalRips: number;
   maxSearchStates: number;
   expansionsPerStep: number;
+  conflictWorkerCount: number;
 }
 
 export type RoutingNodeKind = "grid" | "terminal" | "fixed_via";
@@ -171,7 +177,10 @@ export interface BiscuitBoardRoutingStats {
   graphConflictCollectionDurationMs?: number;
   graphConflictCompactionDurationMs?: number;
   graphConflictCandidateCount?: number;
+  graphConflictUniqueCandidateCount?: number;
   graphConflictDistanceCheckCount?: number;
+  graphConflictBucketEntryCount?: number;
+  graphConflictWorkerCount?: number;
   graphFinalizationDurationMs?: number;
   graphRotatedObstacleProbeDurationMs?: number;
   graphBuildCount?: number;

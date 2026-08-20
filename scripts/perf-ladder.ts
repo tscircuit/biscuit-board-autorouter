@@ -160,6 +160,7 @@ const runWorker = async (
   maximumRuntimeMs: number,
   implementationPath: string | undefined,
   lowMemoryMode: boolean,
+  conflictWorkerCount: number | undefined,
 ) => {
   const implementation = (
     implementationPath
@@ -168,12 +169,11 @@ const runWorker = async (
   ) as typeof import("../lib");
   const { BiscuitBoardRoutingPipelineSolver, getTraceClearanceViolations } =
     implementation;
-  const solver = new BiscuitBoardRoutingPipelineSolver(
-    ladderCase.input,
-    lowMemoryMode
-      ? { ...ladderCase.options, retainIntermediateStages: false }
-      : ladderCase.options,
-  );
+  const solver = new BiscuitBoardRoutingPipelineSolver(ladderCase.input, {
+    ...ladderCase.options,
+    ...(lowMemoryMode ? { retainIntermediateStages: false } : {}),
+    ...(conflictWorkerCount === undefined ? {} : { conflictWorkerCount }),
+  });
   const initialMemory = process.memoryUsage();
   let peakHeapUsedBytes = initialMemory.heapUsed;
   let peakRssBytes = initialMemory.rss;
@@ -352,6 +352,7 @@ const executeWorker = (
   maximumRuntimeMs: number,
   implementationPath: string | undefined,
   lowMemoryMode: boolean,
+  conflictWorkerCount: number | undefined,
 ) => {
   const child = Bun.spawnSync({
     cmd: [
@@ -361,6 +362,9 @@ const executeWorker = (
       `--max-ms=${maximumRuntimeMs}`,
       ...(implementationPath ? [`--implementation=${implementationPath}`] : []),
       ...(lowMemoryMode ? ["--low-memory"] : []),
+      ...(conflictWorkerCount === undefined
+        ? []
+        : [`--conflict-workers=${conflictWorkerCount}`]),
     ],
     stdout: "pipe",
     stderr: "pipe",
@@ -420,6 +424,33 @@ const maximumRuntimeMs = getPositiveNumberArgument("--max-ms", 30_000);
 const implementationPath = getArgument("--implementation");
 const comparisonImplementationPath = getArgument("--compare");
 const lowMemoryMode = process.argv.includes("--low-memory");
+const conflictWorkerArgument = getArgument("--conflict-workers");
+const comparisonConflictWorkerArgument = getArgument(
+  "--compare-conflict-workers",
+);
+const conflictWorkerCount =
+  conflictWorkerArgument === undefined
+    ? undefined
+    : Number(conflictWorkerArgument);
+if (
+  conflictWorkerCount !== undefined &&
+  (!Number.isInteger(conflictWorkerCount) || conflictWorkerCount < 0)
+) {
+  throw new Error("--conflict-workers must be zero or a positive integer");
+}
+const comparisonConflictWorkerCount =
+  comparisonConflictWorkerArgument === undefined
+    ? undefined
+    : Number(comparisonConflictWorkerArgument);
+if (
+  comparisonConflictWorkerCount !== undefined &&
+  (!Number.isInteger(comparisonConflictWorkerCount) ||
+    comparisonConflictWorkerCount < 0)
+) {
+  throw new Error(
+    "--compare-conflict-workers must be zero or a positive integer",
+  );
+}
 if (workerCaseId) {
   const ladderCase = ladderCases.find(({ id }) => id === workerCaseId);
   if (!ladderCase) throw new Error(`Unknown ladder case: ${workerCaseId}`);
@@ -428,6 +459,7 @@ if (workerCaseId) {
     maximumRuntimeMs,
     implementationPath,
     lowMemoryMode,
+    conflictWorkerCount,
   );
 } else {
   const requestedCaseIds = process.argv
@@ -444,7 +476,10 @@ if (workerCaseId) {
   }
   const runCount = getPositiveNumberArgument("--runs", 1);
   const results = selectedCases.map((ladderCase) => {
-    if (!comparisonImplementationPath) {
+    if (
+      !comparisonImplementationPath &&
+      comparisonConflictWorkerCount === undefined
+    ) {
       return {
         level: ladderCase.level,
         id: ladderCase.id,
@@ -456,6 +491,7 @@ if (workerCaseId) {
               maximumRuntimeMs,
               implementationPath,
               lowMemoryMode,
+              conflictWorkerCount,
             ),
           ),
         ),
@@ -476,6 +512,9 @@ if (workerCaseId) {
             ? comparisonImplementationPath
             : implementationPath,
           lowMemoryMode,
+          version === "previous"
+            ? (comparisonConflictWorkerCount ?? conflictWorkerCount)
+            : conflictWorkerCount,
         );
         (version === "previous" ? previousRuns : currentRuns).push(result);
       }

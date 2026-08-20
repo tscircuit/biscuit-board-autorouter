@@ -77,6 +77,18 @@ route count, manufactured-via count, and final clearance violations. Use
 case a longer budget. `--low-memory` measures result-only stage retention.
 `--compare=/path/to/previous/lib/index.ts` alternates previous and current
 workers on every repetition to reduce host-load drift in A/B measurements.
+`--conflict-workers=N` isolates packed conflict collection with a fixed worker
+limit (`1` is serial and `0` is automatic).
+`--compare-conflict-workers=N` alternates that setting against
+`--conflict-workers`, using the same implementation on both sides.
+
+Graph conflict collection is serial by default. Set `conflictWorkerCount: 0`
+to enable a bounded automatic `worker_threads` pool on Node/Bun graphs with at
+least 100,000 trace edges, or set an explicit value above one to force a
+maximum worker count. Browser runtimes and smaller automatic jobs fall back to
+the packed serial collector. Workers share packed geometry/index buffers and
+return transferable conflict chunks, so the input graph is not cloned per
+worker.
 
 Direct `BiscuitBoardRoutingPipelineSolver` instances retain completed stages
 for debugger visualization by default. Set `retainIntermediateStages: false`

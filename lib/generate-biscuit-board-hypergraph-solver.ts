@@ -7,7 +7,6 @@ import {
   pointDistance,
   pointStrictlyInsideRect,
   pointsEqual,
-  segmentDistance,
   segmentIntersectsRectInterior,
   shouldRespectObstacleRotationInGraph,
   visualizePreparedProblem,
@@ -28,6 +27,10 @@ import type { SimpleRouteJson } from "@tscircuit/core";
 import { BuildBiscuitBoardTracesSolver } from "./build-biscuit-board-traces-solver";
 import { getTraceClearanceViolations } from "./post-process-biscuit-board-traces-solver";
 import { RipUpRubberBandSolver } from "./rip-up-rubber-band-solver";
+import {
+  collectRoutingEdgeConflicts,
+  type ConflictPairCollection,
+} from "./conflict-pair-collector";
 
 const ROUNDING_SCALE = 1e6;
 const roundCoordinate = (value: number) =>
@@ -52,6 +55,7 @@ const DEFAULT_OPTIONS: NormalizedBiscuitBoardAutorouterOptions = {
   maxTotalRips: 10_000,
   maxSearchStates: 500_000,
   expansionsPerStep: 300,
+  conflictWorkerCount: 1,
 };
 
 type HypergraphGenerationOptions = NormalizedBiscuitBoardAutorouterOptions & {
@@ -88,6 +92,14 @@ const normalizeOptions = (
     normalized.crossingCost < 0
   ) {
     throw new Error("options.crossingCost must be non-negative");
+  }
+  if (
+    !Number.isInteger(normalized.conflictWorkerCount) ||
+    normalized.conflictWorkerCount < 0
+  ) {
+    throw new Error(
+      "options.conflictWorkerCount must be zero or a positive integer",
+    );
   }
   return normalized;
 };
@@ -414,171 +426,22 @@ const buildDemands = (
   return demands;
 };
 
-class ConflictPairList {
-  private static readonly CHUNK_SHIFT = 20;
-  private static readonly CHUNK_SIZE = 1 << ConflictPairList.CHUNK_SHIFT;
-  private static readonly CHUNK_MASK = ConflictPairList.CHUNK_SIZE - 1;
-  private readonly chunks: Uint32Array[] = [
-    new Uint32Array(ConflictPairList.CHUNK_SIZE),
-  ];
-  private valueCount = 0;
-
-  push(firstEdgeId: number, secondEdgeId: number) {
-    this.setNext(firstEdgeId);
-    this.setNext(secondEdgeId);
-  }
-
-  forEach(visit: (firstEdgeId: number, secondEdgeId: number) => void) {
-    for (let offset = 0; offset < this.valueCount; offset += 2) {
-      visit(this.get(offset), this.get(offset + 1));
-    }
-  }
-
-  private setNext(value: number) {
-    const chunkIndex = this.valueCount >>> ConflictPairList.CHUNK_SHIFT;
-    if (!this.chunks[chunkIndex]) {
-      this.chunks.push(new Uint32Array(ConflictPairList.CHUNK_SIZE));
-    }
-    this.chunks[chunkIndex]![this.valueCount & ConflictPairList.CHUNK_MASK] =
-      value;
-    this.valueCount++;
-  }
-
-  private get(index: number) {
-    return this.chunks[index >>> ConflictPairList.CHUNK_SHIFT]![
-      index & ConflictPairList.CHUNK_MASK
-    ]!;
-  }
-}
-
 interface HypergraphBuildTimings {
   structureMs: number;
   conflictCollectionMs: number;
   conflictCompactionMs: number;
   conflictCandidateCount: number;
+  conflictUniqueCandidateCount: number;
   conflictDistanceCheckCount: number;
+  conflictBucketEntryCount: number;
+  conflictWorkerCount: number;
   finalizationMs: number;
   buildCount: number;
 }
 
-const collectConflictPairs = (
-  edges: RoutingEdge[],
-  nodes: RoutingNode[],
-  minimumTraceCenterDistance: number,
-  timings?: HypergraphBuildTimings,
-) => {
-  const conflictPairs = new ConflictPairList();
-  const traceEdges = edges.filter(
-    (edge): edge is Extract<RoutingEdge, { kind: "trace" }> =>
-      edge.kind === "trace",
-  );
-  const bucketSize = 2;
-  const buckets = new Map<number, number[]>();
-  const layerIndexByName = new Map<string, number>();
-  const getBucketKey = (layer: string, x: number, y: number) => {
-    let layerIndex = layerIndexByName.get(layer);
-    if (layerIndex === undefined) {
-      layerIndex = layerIndexByName.size;
-      layerIndexByName.set(layer, layerIndex);
-    }
-    // Bucket coordinates are small (board-sized / 2), so an offset of 2^15
-    // keeps the packed key unique and positive.
-    return (layerIndex * 65536 + (x + 32768)) * 65536 + (y + 32768);
-  };
-  // Deduplicates bucket candidates without allocating a Set per edge; the
-  // visit order over buckets is unchanged, so conflict lists keep the exact
-  // ordering the string-keyed implementation produced.
-  const lastSeenByEdgeId = new Int32Array(edges.length).fill(-1);
-  // Segment bounding boxes for a cheap reject before the exact distance test:
-  // if two boxes are separated by more than the conflict radius on either
-  // axis, the segments cannot be within that radius.
-  const boundsByEdgeId = new Float64Array(edges.length * 4);
-  for (const edge of traceEdges) {
-    const from = nodes[edge.fromNode]!;
-    const to = nodes[edge.toNode]!;
-    const offset = edge.edgeId * 4;
-    boundsByEdgeId[offset] = Math.min(from.x, to.x);
-    boundsByEdgeId[offset + 1] = Math.max(from.x, to.x);
-    boundsByEdgeId[offset + 2] = Math.min(from.y, to.y);
-    boundsByEdgeId[offset + 3] = Math.max(from.y, to.y);
-  }
-  for (const edge of traceEdges) {
-    const from = nodes[edge.fromNode]!;
-    const to = nodes[edge.toNode]!;
-    const edgeMinX = Math.min(from.x, to.x) - minimumTraceCenterDistance;
-    const edgeMaxX = Math.max(from.x, to.x) + minimumTraceCenterDistance;
-    const edgeMinY = Math.min(from.y, to.y) - minimumTraceCenterDistance;
-    const edgeMaxY = Math.max(from.y, to.y) + minimumTraceCenterDistance;
-    const minBucketX = Math.floor(edgeMinX / bucketSize);
-    const maxBucketX = Math.floor(edgeMaxX / bucketSize);
-    const minBucketY = Math.floor(edgeMinY / bucketSize);
-    const maxBucketY = Math.floor(edgeMaxY / bucketSize);
-    // Query with the clearance-expanded bounds, but index the segment only by
-    // its actual bounds. Expanding both sides doubles the search radius and
-    // floods dense buckets with candidates that the exact distance check will
-    // always reject.
-    const boundsOffset = edge.edgeId * 4;
-    const insertMinBucketX = Math.floor(
-      boundsByEdgeId[boundsOffset]! / bucketSize,
-    );
-    const insertMaxBucketX = Math.floor(
-      boundsByEdgeId[boundsOffset + 1]! / bucketSize,
-    );
-    const insertMinBucketY = Math.floor(
-      boundsByEdgeId[boundsOffset + 2]! / bucketSize,
-    );
-    const insertMaxBucketY = Math.floor(
-      boundsByEdgeId[boundsOffset + 3]! / bucketSize,
-    );
-    for (let x = minBucketX; x <= maxBucketX; x++) {
-      for (let y = minBucketY; y <= maxBucketY; y++) {
-        const bucket = buckets.get(getBucketKey(from.layer, x, y));
-        if (!bucket) continue;
-        for (const candidateId of bucket) {
-          if (timings) timings.conflictCandidateCount++;
-          if (lastSeenByEdgeId[candidateId] === edge.edgeId) continue;
-          lastSeenByEdgeId[candidateId] = edge.edgeId;
-          const candidateOffset = candidateId * 4;
-          if (
-            boundsByEdgeId[candidateOffset]! > edgeMaxX ||
-            boundsByEdgeId[candidateOffset + 1]! < edgeMinX ||
-            boundsByEdgeId[candidateOffset + 2]! > edgeMaxY ||
-            boundsByEdgeId[candidateOffset + 3]! < edgeMinY
-          ) {
-            continue;
-          }
-          const candidate = edges[candidateId] as Extract<
-            RoutingEdge,
-            { kind: "trace" }
-          >;
-          const candidateFrom = nodes[candidate.fromNode]!;
-          const candidateTo = nodes[candidate.toNode]!;
-          if (timings) timings.conflictDistanceCheckCount++;
-          if (
-            from.layer === candidateFrom.layer &&
-            segmentDistance(from, to, candidateFrom, candidateTo) <
-              minimumTraceCenterDistance - 1e-7
-          ) {
-            conflictPairs.push(edge.edgeId, candidateId);
-          }
-        }
-      }
-    }
-    for (let x = insertMinBucketX; x <= insertMaxBucketX; x++) {
-      for (let y = insertMinBucketY; y <= insertMaxBucketY; y++) {
-        const key = getBucketKey(from.layer, x, y);
-        const values = buckets.get(key);
-        if (values) values.push(edge.edgeId);
-        else buckets.set(key, [edge.edgeId]);
-      }
-    }
-  }
-  return conflictPairs;
-};
-
 const compactConflictPairs = (
   edges: RoutingEdge[],
-  conflictPairs: ConflictPairList,
+  conflictPairs: ConflictPairCollection,
 ) => {
   const conflictCountByEdge = new Uint32Array(edges.length);
   conflictPairs.forEach((firstEdgeId, secondEdgeId) => {
@@ -1178,16 +1041,26 @@ const buildBiscuitBoardHypergraph = (
   const conflictCollectionStartedAt = performance.now();
   if (timings)
     timings.structureMs += conflictCollectionStartedAt - buildStartedAt;
-  const conflictPairs = collectConflictPairs(
+  const conflictCollection = collectRoutingEdgeConflicts(
     edges,
     nodes,
     maximumTraceWidth + effectiveClearance,
-    timings,
+    options.conflictWorkerCount,
   );
+  const conflictPairs = conflictCollection.pairs;
   const conflictCompactionStartedAt = performance.now();
   if (timings) {
     timings.conflictCollectionMs +=
       conflictCompactionStartedAt - conflictCollectionStartedAt;
+    timings.conflictCandidateCount += conflictCollection.candidateVisitCount;
+    timings.conflictUniqueCandidateCount +=
+      conflictCollection.uniqueCandidateCount;
+    timings.conflictDistanceCheckCount += conflictCollection.distanceCheckCount;
+    timings.conflictBucketEntryCount += conflictCollection.bucketEntryCount;
+    timings.conflictWorkerCount = Math.max(
+      timings.conflictWorkerCount,
+      conflictCollection.workerCount,
+    );
   }
   const { conflictOffsets, compactConflictEdgeIds } = compactConflictPairs(
     edges,
@@ -1255,7 +1128,10 @@ export class GenerateBiscuitBoardHypergraphSolver extends BaseSolver {
       conflictCollectionMs: 0,
       conflictCompactionMs: 0,
       conflictCandidateCount: 0,
+      conflictUniqueCandidateCount: 0,
       conflictDistanceCheckCount: 0,
+      conflictBucketEntryCount: 0,
+      conflictWorkerCount: 0,
       finalizationMs: 0,
       buildCount: 0,
     };
@@ -1351,7 +1227,11 @@ export class GenerateBiscuitBoardHypergraphSolver extends BaseSolver {
         buildTimings.conflictCompactionMs,
       ),
       graphConflictCandidateCount: buildTimings.conflictCandidateCount,
+      graphConflictUniqueCandidateCount:
+        buildTimings.conflictUniqueCandidateCount,
       graphConflictDistanceCheckCount: buildTimings.conflictDistanceCheckCount,
+      graphConflictBucketEntryCount: buildTimings.conflictBucketEntryCount,
+      graphConflictWorkerCount: buildTimings.conflictWorkerCount,
       graphFinalizationDurationMs: Math.round(buildTimings.finalizationMs),
       graphRotatedObstacleProbeDurationMs: Math.round(
         performance.now() - rotatedObstacleProbeStartedAt,
