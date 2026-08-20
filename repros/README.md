@@ -138,6 +138,24 @@ terminal nor a junction on another `source_net_1` trace, leaving visible copper
 that connects to nothing. The regression test verifies that exact dangling
 endpoint and snapshots the prefabricated-via area shown in the original report.
 
+## Repro 09 · RP2040 BOOTSEL dangling trace
+
+- Source: `tscircuit/biscuit-boards` worktree at
+  `b12fc590378d0ec156726dbf819c628623d15246`
+- Autorouter revision used by that source:
+  `db0663c79f6efdbba98f4ac0eafac478130dcb1f`
+- Circuit: `examples/rp2040-photodiode-crystal-buttons.tsx`
+- Capture point: the normalized `SimpleRouteJson` passed to
+  `BiscuitBoardAutorouter`
+- Input: 28 merged connections, 209 obstacles, 2 layers, and 82 routing
+  demands
+
+The routing pipeline reports success, but the `source_net_0` branch from
+`SW_BOOTSEL.B_ALT` ends at `(18.625, -3.625)` on the top layer. That endpoint
+is neither a requested terminal nor a junction on another GND trace. The
+regression test verifies the exact dead end and snapshots the BOOTSEL region
+shown in the original report.
+
 ## Headless benchmark suite
 
 `./benchmark.sh` runs Repros 01, 02, 03, and 06. Every case intentionally
