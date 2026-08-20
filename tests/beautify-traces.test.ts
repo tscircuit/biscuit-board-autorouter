@@ -315,7 +315,7 @@ test("beautification combines unobstructed parallel same-net spans", () => {
 
   expect(
     getLongestSharedHorizontalRun(beautified.traces[0]!, beautified.traces[1]!),
-  ).toBeCloseTo(2, 7);
+  ).toBeGreaterThan(3.9);
   expect(beautified.stats.sameNetConsolidationCount).toBeGreaterThan(0);
   for (const [traceIndex, trace] of beautified.traces.entries()) {
     expect(trace.route[0]).toEqual(solution.traces[traceIndex]!.route[0]);
@@ -325,7 +325,7 @@ test("beautification combines unobstructed parallel same-net spans", () => {
   }
 });
 
-test("parallel same-net consolidation uses 45-degree approaches at shared junctions", () => {
+test("overlapping parallel same-net copper uses 45-degree approaches", () => {
   const input: SimpleRouteJson = {
     bounds: { minX: 0, minY: 0, maxX: 10, maxY: 8 },
     layerCount: 1,
@@ -344,8 +344,8 @@ test("parallel same-net consolidation uses 45-degree approaches at shared juncti
         name: "offset-ground",
         netConnectionName: "GND",
         pointsToConnect: [
-          { x: 2, y: 5, layer: "top", pointId: "offset-left" },
-          { x: 8, y: 5, layer: "top", pointId: "offset-right" },
+          { x: 2, y: 3.05, layer: "top", pointId: "offset-left" },
+          { x: 8, y: 3.05, layer: "top", pointId: "offset-right" },
         ],
       },
     ],
@@ -356,8 +356,8 @@ test("parallel same-net consolidation uses 45-degree approaches at shared juncti
       { x: 8, y: 3 },
     ],
     [
-      { x: 2, y: 5 },
-      { x: 8, y: 5 },
+      { x: 2, y: 3.05 },
+      { x: 8, y: 3.05 },
     ],
   ]);
 

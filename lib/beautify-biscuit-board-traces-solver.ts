@@ -348,10 +348,17 @@ const createParallelConsolidationCandidate = (
   });
   const candidateEntry = pointOnSegment(entryProjection);
   const candidateExit = pointOnSegment(exitProjection);
-  // Advance by the lane offset while crossing that offset so both transitions
-  // meet the shared centerline at 45 degrees.
-  const anchorEntry = pointOnAnchor(entryProjection + travelDirection * offset);
-  const anchorExit = pointOnAnchor(exitProjection - travelDirection * offset);
+  const copperAlreadyOverlaps =
+    offset <= (segment.start.width + anchor.start.width) / 2 + EPSILON;
+  // Only nudge nearly coincident centerlines. Applying this shift to separated
+  // lanes reroutes otherwise straight branches merely to make the approach 45°.
+  const approachProjectionOffset = copperAlreadyOverlaps ? offset : 0;
+  const anchorEntry = pointOnAnchor(
+    entryProjection + travelDirection * approachProjectionOffset,
+  );
+  const anchorExit = pointOnAnchor(
+    exitProjection - travelDirection * approachProjectionOffset,
+  );
   const corridor = [candidateEntry, candidateExit, anchorExit, anchorEntry];
   if (
     !parallelCorridorIsEmpty(
