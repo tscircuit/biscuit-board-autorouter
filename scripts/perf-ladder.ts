@@ -33,6 +33,10 @@ interface WorkerResult {
   cpuTimeMs: number;
   stage: string;
   stageDurationsMs: Record<string, number>;
+  stagePeakMemoryBytes: Record<
+    string,
+    { heapUsedBytes: number; rssBytes: number }
+  >;
   heapUsedBeforeBytes: number;
   peakHeapUsedBytes: number;
   rssBeforeBytes: number;
@@ -48,6 +52,7 @@ interface WorkerResult {
   expectedTraceCount: number | null;
   traceCount: number;
   manufacturedViaCount: number;
+  outOfBoundsPointCount: number;
   clearanceViolationCount: number;
   stats: BiscuitBoardRoutingStats | null;
 }
@@ -161,6 +166,8 @@ const runWorker = async (
   implementationPath: string | undefined,
   lowMemoryMode: boolean,
   conflictWorkerCount: number | undefined,
+  heuristicWeight: number | undefined,
+  routeOrder: BiscuitBoardAutorouterOptions["routeOrder"] | undefined,
 ) => {
   const implementation = (
     implementationPath
@@ -173,6 +180,8 @@ const runWorker = async (
     ...ladderCase.options,
     ...(lowMemoryMode ? { retainIntermediateStages: false } : {}),
     ...(conflictWorkerCount === undefined ? {} : { conflictWorkerCount }),
+    ...(heuristicWeight === undefined ? {} : { heuristicWeight }),
+    ...(routeOrder === undefined ? {} : { routeOrder }),
   });
   const initialMemory = process.memoryUsage();
   let peakHeapUsedBytes = initialMemory.heapUsed;
@@ -182,6 +191,10 @@ const runWorker = async (
   let prepared: PreparedBiscuitRoutingProblem | null = null;
   let nextMemorySampleAt = 0;
   const stageDurationsMs = new Map<string, number>();
+  const stagePeakMemoryBytes = new Map<
+    string,
+    { heapUsedBytes: number; rssBytes: number }
+  >();
   const startedAt = performance.now();
   const cpuStartedAt = process.cpuUsage();
   let thrownError: string | null = null;
@@ -212,6 +225,14 @@ const runWorker = async (
           peakArrayBuffersBytes,
           memory.arrayBuffers,
         );
+        const stagePeak = stagePeakMemoryBytes.get(stage);
+        stagePeakMemoryBytes.set(stage, {
+          heapUsedBytes: Math.max(
+            stagePeak?.heapUsedBytes ?? 0,
+            memory.heapUsed,
+          ),
+          rssBytes: Math.max(stagePeak?.rssBytes ?? 0, memory.rss),
+        });
         nextMemorySampleAt = now + 50;
       }
     }
@@ -247,10 +268,25 @@ const runWorker = async (
     | undefined;
   const clearanceViolations =
     prepared && output ? getTraceClearanceViolations(prepared, output) : [];
-  const manufacturedViaCount =
-    output?.traces
-      .flatMap((trace) => trace.route)
-      .filter((point) => point.route_type === "via").length ?? 0;
+  let manufacturedViaCount = 0;
+  let outOfBoundsPointCount = 0;
+  if (output) {
+    const { minX, maxX, minY, maxY } = ladderCase.input.bounds;
+    const epsilon = 1e-9;
+    for (const trace of output.traces) {
+      for (const point of trace.route) {
+        if (point.route_type === "via") manufacturedViaCount++;
+        if (
+          point.x < minX - epsilon ||
+          point.x > maxX + epsilon ||
+          point.y < minY - epsilon ||
+          point.y > maxY + epsilon
+        ) {
+          outOfBoundsPointCount++;
+        }
+      }
+    }
+  }
   const expectedTraceCount = prepared?.demands.length ?? null;
   const stats = output?.stats ?? routeStats ?? graphStats ?? null;
   if (stats && graphStats) Object.assign(stats, graphStats);
@@ -262,6 +298,7 @@ const runWorker = async (
       expectedTraceCount !== null &&
       output.traces.length === expectedTraceCount &&
       manufacturedViaCount === 0 &&
+      outOfBoundsPointCount === 0 &&
       clearanceViolations.length === 0,
   );
 
@@ -283,6 +320,7 @@ const runWorker = async (
         Math.round(duration),
       ]),
     ),
+    stagePeakMemoryBytes: Object.fromEntries(stagePeakMemoryBytes),
     heapUsedBeforeBytes: initialMemory.heapUsed,
     peakHeapUsedBytes,
     rssBeforeBytes: initialMemory.rss,
@@ -304,6 +342,7 @@ const runWorker = async (
     expectedTraceCount,
     traceCount: output?.traces.length ?? 0,
     manufacturedViaCount,
+    outOfBoundsPointCount,
     clearanceViolationCount: clearanceViolations.length,
     stats,
   };
@@ -342,6 +381,27 @@ const averageStageDurations = (runs: WorkerResult[]) => {
   );
 };
 
+const averageStagePeakMemory = (runs: WorkerResult[]) => {
+  const stages = new Set(
+    runs.flatMap((run) => Object.keys(run.stagePeakMemoryBytes)),
+  );
+  return Object.fromEntries(
+    Array.from(stages, (stage) => [
+      stage,
+      {
+        heapUsedBytes: roundedMean(
+          runs.map(
+            (run) => run.stagePeakMemoryBytes[stage]?.heapUsedBytes ?? 0,
+          ),
+        ),
+        rssBytes: roundedMean(
+          runs.map((run) => run.stagePeakMemoryBytes[stage]?.rssBytes ?? 0),
+        ),
+      },
+    ]),
+  );
+};
+
 const percentile = (values: number[], percentileValue: number) => {
   const sorted = values.slice().sort((left, right) => left - right);
   return sorted[Math.ceil((sorted.length - 1) * percentileValue)]!;
@@ -353,6 +413,8 @@ const executeWorker = (
   implementationPath: string | undefined,
   lowMemoryMode: boolean,
   conflictWorkerCount: number | undefined,
+  heuristicWeight: number | undefined,
+  routeOrder: BiscuitBoardAutorouterOptions["routeOrder"] | undefined,
 ) => {
   const child = Bun.spawnSync({
     cmd: [
@@ -365,6 +427,10 @@ const executeWorker = (
       ...(conflictWorkerCount === undefined
         ? []
         : [`--conflict-workers=${conflictWorkerCount}`]),
+      ...(heuristicWeight === undefined
+        ? []
+        : [`--heuristic-weight=${heuristicWeight}`]),
+      ...(routeOrder === undefined ? [] : [`--route-order=${routeOrder}`]),
     ],
     stdout: "pipe",
     stderr: "pipe",
@@ -416,6 +482,7 @@ const summarizeRuns = (runs: WorkerResult[]) => ({
     runs.map(({ peakRssGrowthBytes }) => peakRssGrowthBytes),
   ),
   averageStageDurationsMs: averageStageDurations(runs),
+  averageStagePeakMemoryBytes: averageStagePeakMemory(runs),
   runs,
 });
 
@@ -425,6 +492,8 @@ const implementationPath = getArgument("--implementation");
 const comparisonImplementationPath = getArgument("--compare");
 const lowMemoryMode = process.argv.includes("--low-memory");
 const conflictWorkerArgument = getArgument("--conflict-workers");
+const heuristicWeightArgument = getArgument("--heuristic-weight");
+const routeOrderArgument = getArgument("--route-order");
 const comparisonConflictWorkerArgument = getArgument(
   "--compare-conflict-workers",
 );
@@ -438,6 +507,32 @@ if (
 ) {
   throw new Error("--conflict-workers must be zero or a positive integer");
 }
+const heuristicWeight =
+  heuristicWeightArgument === undefined
+    ? undefined
+    : Number(heuristicWeightArgument);
+if (
+  heuristicWeight !== undefined &&
+  (!Number.isFinite(heuristicWeight) || heuristicWeight < 1)
+) {
+  throw new Error("--heuristic-weight must be at least one");
+}
+const validRouteOrders = new Set([
+  "adaptive",
+  "longest_first",
+  "shortest_first",
+  "signal_longest_first",
+  "input",
+]);
+if (
+  routeOrderArgument !== undefined &&
+  !validRouteOrders.has(routeOrderArgument)
+) {
+  throw new Error(`Unknown --route-order: ${routeOrderArgument}`);
+}
+const routeOrder = routeOrderArgument as
+  | BiscuitBoardAutorouterOptions["routeOrder"]
+  | undefined;
 const comparisonConflictWorkerCount =
   comparisonConflictWorkerArgument === undefined
     ? undefined
@@ -460,6 +555,8 @@ if (workerCaseId) {
     implementationPath,
     lowMemoryMode,
     conflictWorkerCount,
+    heuristicWeight,
+    routeOrder,
   );
 } else {
   const requestedCaseIds = process.argv
@@ -492,6 +589,8 @@ if (workerCaseId) {
               implementationPath,
               lowMemoryMode,
               conflictWorkerCount,
+              heuristicWeight,
+              routeOrder,
             ),
           ),
         ),
@@ -515,6 +614,8 @@ if (workerCaseId) {
           version === "previous"
             ? (comparisonConflictWorkerCount ?? conflictWorkerCount)
             : conflictWorkerCount,
+          heuristicWeight,
+          routeOrder,
         );
         (version === "previous" ? previousRuns : currentRuns).push(result);
       }

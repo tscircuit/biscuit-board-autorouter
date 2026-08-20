@@ -34,6 +34,10 @@ export interface BiscuitBoardAutorouterOptions {
   maxTotalRips?: number;
   maxSearchStates?: number;
   expansionsPerStep?: number;
+  /** A* heuristic multiplier. Values above one trade path optimality for speed. */
+  heuristicWeight?: number;
+  /** Upper bound for negotiation-driven heuristic escalation. */
+  maxHeuristicWeight?: number;
   /**
    * Conflict-index worker threads. Zero selects an automatic bounded count,
    * one disables parallelism, and values above one set the maximum.
@@ -64,6 +68,8 @@ export interface NormalizedBiscuitBoardAutorouterOptions {
   maxTotalRips: number;
   maxSearchStates: number;
   expansionsPerStep: number;
+  heuristicWeight: number;
+  maxHeuristicWeight: number;
   conflictWorkerCount: number;
 }
 
@@ -189,6 +195,8 @@ export interface BiscuitBoardRoutingStats {
   adaptivePriorityChangeCount?: number;
   maximumActiveSearchNodeCount?: number;
   maximumOpenHeapSize?: number;
+  searchCount?: number;
+  failedSearchCount?: number;
   maximumForeignOwnerCacheEntries?: number;
   nodeAllowanceCacheHitCount?: number;
   nodeAllowanceCacheMissCount?: number;
@@ -198,6 +206,7 @@ export interface BiscuitBoardRoutingStats {
   foreignOwnerCacheMissCount?: number;
   targetHeuristicCacheHitCount?: number;
   targetHeuristicCacheMissCount?: number;
+  maximumHeuristicWeight?: number;
   activeRouteId?: string | null;
   activeExpandedStateCount?: number;
   postProcessedClearance?: number;

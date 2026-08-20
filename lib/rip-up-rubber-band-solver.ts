@@ -26,7 +26,7 @@ interface SearchNode {
   blockerState: number;
   g: number;
   parentIndex: number;
-  blockers: string[];
+  blockers: number[];
   edgeFromParent: number | null;
   visitedPreferredLayer: boolean;
   requiredViaIndex: number;
@@ -41,6 +41,7 @@ interface ActiveSearch {
   targetNodes: Set<number>;
   targetTreesByLayer: Map<string, TargetKdNode | null>;
   targetHeuristicGeneration: number;
+  heuristicWeight: number;
   nodes: SearchNode[];
   open: MinHeap<number>;
   bestCostByState: Map<number, number>;
@@ -129,16 +130,16 @@ const nearestTargetDistanceSquared = (
   return best;
 };
 
-const insertSortedUnique = (values: string[], additions: string[]) => {
+const insertSortedUnique = (values: number[], additions: number[]) => {
   if (additions.length === 0) return values;
   if (values.length === 0) return additions;
-  const merged: string[] = [];
+  const merged: number[] = [];
   let valueIndex = 0;
   let additionIndex = 0;
   while (valueIndex < values.length || additionIndex < additions.length) {
     const value = values[valueIndex];
     const addition = additions[additionIndex];
-    let next: string;
+    let next: number;
     if (addition === undefined || (value !== undefined && value < addition)) {
       next = values[valueIndex++]!;
     } else if (value === undefined || addition < value) {
@@ -153,13 +154,11 @@ const insertSortedUnique = (values: string[], additions: string[]) => {
   return merged;
 };
 
-const blockerSetHash = (blockers: readonly string[]) => {
+const blockerSetHash = (blockers: readonly number[]) => {
   let hash = 2166136261;
-  for (const blocker of blockers) {
-    for (let index = 0; index < blocker.length; index++) {
-      hash ^= blocker.charCodeAt(index);
-      hash = Math.imul(hash, 16777619);
-    }
+  for (const blockerIndex of blockers) {
+    hash ^= blockerIndex + 1;
+    hash = Math.imul(hash, 16777619);
   }
   // A small lossy blocker-state table bounds the A* state count while keeping
   // enough distinct rip choices to escape fixed-via allocation deadlocks.
@@ -178,14 +177,15 @@ const deterministicOrderKey = (value: string, pass: number) => {
 // Prefer enough room for the requested final width around immovable pads,
 // while keeping the physical-width route available as a congestion fallback.
 const NOMINAL_OBSTACLE_PENALTY_MULTIPLIER = 10;
-const NO_BLOCKERS: string[] = [];
+const NO_BLOCKERS: number[] = [];
+const NO_OWNED_NODES = new Set<number>();
 
 export class RipUpRubberBandSolver extends BaseSolver {
   private readonly committed = new Map<string, RoutedConnection>();
   private readonly pending: RouteDemand[];
   private readonly inputIndexByDemand = new WeakMap<RouteDemand, number>();
-  private readonly edgeOwners = new Map<number, Set<string>>();
-  private readonly nodeOwners = new Map<number, Set<string>>();
+  private readonly edgeOwners = new Map<number, Set<number>>();
+  private readonly nodeOwners = new Map<number, Set<number>>();
   private readonly edgeHasOwners: Uint8Array;
   private readonly nodeHasOwners: Uint8Array;
   private readonly routeDependenciesByRoute = new Map<string, Set<string>>();
@@ -206,11 +206,20 @@ export class RipUpRubberBandSolver extends BaseSolver {
   >();
   private readonly forcedGuideConnectionNames = new Set<string>();
   private readonly reservedGuideOwnerByEdgeId = new Map<number, string>();
-  private readonly ripCountByRoute = new Map<string, number>();
+  private readonly routeIndexById: Map<string, number>;
+  private readonly routeIdByIndex: string[];
+  private readonly routeIndexByDemand = new WeakMap<RouteDemand, number>();
+  private readonly netIndexByRoute: Uint32Array;
+  private readonly widthByRoute: Float64Array;
+  private readonly ripCountByRoute: Uint32Array;
   private readonly conflictComponentAttemptCount = new Map<string, number>();
   private readonly terminalEscapeConstraintsByDemand = new WeakMap<
     RouteDemand,
     TerminalEscapeConstraint[]
+  >();
+  private readonly protectedCorridorsByDemand = new WeakMap<
+    RouteDemand,
+    ActiveSearch["protectedCorridors"]
   >();
   // Direct-mapped demand caches keep one bounded graph-sized buffer per
   // property instead of retaining one full buffer for every route demand.
@@ -229,7 +238,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
   private readonly nominalObstaclePenaltyCacheKeys: Uint32Array;
   private readonly nominalObstaclePenaltyCacheValues: Float64Array;
   private readonly foreignOwnerCacheGenerationByEdge: Uint32Array;
-  private readonly foreignOwnerCacheValues: Array<string[] | undefined>;
+  private readonly foreignOwnerCacheValues: Array<number[] | undefined>;
   private nextForeignOwnerCacheGeneration = 1;
   // The center-to-center distance between a trace edge and each entry in its
   // conflictEdgeIds list is immutable topology; computing it once removes the
@@ -241,9 +250,10 @@ export class RipUpRubberBandSolver extends BaseSolver {
   // routes have copper within the generator's conflict radius, and at which
   // center-to-center distances. Updated on commit/uncommit so the A* loop
   // never rescans conflict lists.
-  private readonly occupancyByEdge = new Map<number, Map<string, number[]>>();
+  private readonly occupancyByEdge = new Map<number, Map<number, number[]>>();
   private readonly edgeHasConflictOccupancy: Uint8Array;
   private readonly ownedNodeCountByNet = new Map<string, Map<number, number>>();
+  private readonly ownedNodesByNet = new Map<string, Set<number>>();
   private readonly effectiveClearance: number;
   private readonly routingScale: number;
   private readonly targetHeuristicByNode: Float64Array;
@@ -253,6 +263,8 @@ export class RipUpRubberBandSolver extends BaseSolver {
   private activeSearch: ActiveSearch | null = null;
   private maximumActiveSearchNodeCount = 0;
   private maximumOpenHeapSize = 0;
+  private searchCount = 0;
+  private failedSearchCount = 0;
   private maximumForeignOwnerCacheEntries = 0;
   private nodeAllowanceCacheHitCount = 0;
   private nodeAllowanceCacheMissCount = 0;
@@ -262,6 +274,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
   private foreignOwnerCacheMissCount = 0;
   private targetHeuristicCacheHitCount = 0;
   private targetHeuristicCacheMissCount = 0;
+  private maximumHeuristicWeightUsed = 1;
   private connectivityRepairCount = 0;
   private totalRipCount = 0;
   private totalExpandedStateCount = 0;
@@ -272,6 +285,29 @@ export class RipUpRubberBandSolver extends BaseSolver {
 
   constructor(public readonly prepared: PreparedBiscuitRoutingProblem) {
     super();
+    // Numeric ordering matches the previous lexical blocker ordering so the
+    // compact representation does not perturb negotiation solely by ID shape.
+    this.routeIdByIndex = prepared.demands
+      .map((demand) => demand.routeId)
+      .sort();
+    this.routeIndexById = new Map(
+      this.routeIdByIndex.map((routeId, routeIndex) => [routeId, routeIndex]),
+    );
+    const netIndexById = new Map<string, number>();
+    this.netIndexByRoute = new Uint32Array(prepared.demands.length);
+    this.widthByRoute = new Float64Array(prepared.demands.length);
+    this.ripCountByRoute = new Uint32Array(prepared.demands.length);
+    for (const demand of prepared.demands) {
+      const routeIndex = this.routeIndexById.get(demand.routeId)!;
+      let netIndex = netIndexById.get(demand.netId);
+      if (netIndex === undefined) {
+        netIndex = netIndexById.size;
+        netIndexById.set(demand.netId, netIndex);
+      }
+      this.routeIndexByDemand.set(demand, routeIndex);
+      this.netIndexByRoute[routeIndex] = netIndex;
+      this.widthByRoute[routeIndex] = demand.width;
+    }
     this.effectiveClearance = Math.max(
       prepared.options.gridClearance,
       prepared.input.minTraceToPadEdgeClearance ?? 0,
@@ -421,15 +457,20 @@ export class RipUpRubberBandSolver extends BaseSolver {
       this.queueDemand(routeId);
     }
     this.totalRipCount = 0;
-    this.ripCountByRoute.clear();
+    this.ripCountByRoute.fill(0);
     this.updateStats();
   }
 
   private installSeededRoute(route: RoutedConnection) {
+    const routeIndex = this.routeIndexById.get(route.routeId);
+    if (routeIndex === undefined) {
+      throw new Error(`Cannot seed unknown route "${route.routeId}"`);
+    }
     const dependencies = new Set<string>();
     for (const endpointNode of [route.nodePath[0], route.nodePath.at(-1)]) {
       if (endpointNode === undefined) continue;
-      for (const ownerRouteId of this.nodeOwners.get(endpointNode) ?? []) {
+      for (const ownerRouteIndex of this.nodeOwners.get(endpointNode) ?? []) {
+        const ownerRouteId = this.routeIdByIndex[ownerRouteIndex]!;
         if (this.committed.get(ownerRouteId)?.netId === route.netId) {
           dependencies.add(ownerRouteId);
         }
@@ -440,12 +481,16 @@ export class RipUpRubberBandSolver extends BaseSolver {
     const ownedNodeCounts =
       this.ownedNodeCountByNet.get(route.netId) ?? new Map<number, number>();
     this.ownedNodeCountByNet.set(route.netId, ownedNodeCounts);
+    const ownedNodes =
+      this.ownedNodesByNet.get(route.netId) ?? new Set<number>();
+    this.ownedNodesByNet.set(route.netId, ownedNodes);
     for (const nodeIndex of route.nodePath) {
-      const owners = this.nodeOwners.get(nodeIndex) ?? new Set<string>();
-      owners.add(route.routeId);
+      const owners = this.nodeOwners.get(nodeIndex) ?? new Set<number>();
+      owners.add(routeIndex);
       this.nodeOwners.set(nodeIndex, owners);
       this.nodeHasOwners[nodeIndex] = 1;
       ownedNodeCounts.set(nodeIndex, (ownedNodeCounts.get(nodeIndex) ?? 0) + 1);
+      ownedNodes.add(nodeIndex);
     }
     for (const edgeId of route.edgePath) {
       const edge = this.prepared.edges[edgeId]!;
@@ -453,8 +498,8 @@ export class RipUpRubberBandSolver extends BaseSolver {
         this.committedFixedViaTransitionCount++;
         continue;
       }
-      const owners = this.edgeOwners.get(edgeId) ?? new Set<string>();
-      owners.add(route.routeId);
+      const owners = this.edgeOwners.get(edgeId) ?? new Set<number>();
+      owners.add(routeIndex);
       this.edgeOwners.set(edgeId, owners);
       this.edgeHasOwners[edgeId] = 1;
       const conflictDistances = this.getConflictDistances(edge);
@@ -463,12 +508,12 @@ export class RipUpRubberBandSolver extends BaseSolver {
         const conflictEdgeId = this.getConflictEdgeId(edge, index);
         const occupancy =
           this.occupancyByEdge.get(conflictEdgeId) ??
-          new Map<string, number[]>();
+          new Map<number, number[]>();
         this.occupancyByEdge.set(conflictEdgeId, occupancy);
         this.edgeHasConflictOccupancy[conflictEdgeId] = 1;
-        const distances = occupancy.get(route.routeId) ?? [];
+        const distances = occupancy.get(routeIndex) ?? [];
         distances.push(conflictDistances[index]!);
-        occupancy.set(route.routeId, distances);
+        occupancy.set(routeIndex, distances);
       }
     }
   }
@@ -532,13 +577,20 @@ export class RipUpRubberBandSolver extends BaseSolver {
     // negotiation; reshuffling it can recreate the same local cycle. Fresh
     // work adapts within a bounded topology-ordered window so congestion can
     // influence priority without starving another net.
-    if (this.ripCountByRoute.has(this.pending[0]!.routeId)) {
+    if (
+      this.ripCountByRoute[this.routeIndexByDemand.get(this.pending[0]!)!]! > 0
+    ) {
       return this.pending.shift();
     }
     let bestIndex = 0;
     const lookahead = Math.min(8, this.pending.length);
     for (let index = 1; index < lookahead; index++) {
-      if (this.ripCountByRoute.has(this.pending[index]!.routeId)) break;
+      if (
+        this.ripCountByRoute[
+          this.routeIndexByDemand.get(this.pending[index]!)!
+        ]! > 0
+      )
+        break;
       if (
         this.compareAdaptivePriority(
           this.pending[index]!,
@@ -600,6 +652,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
     demand: RouteDemand,
     allowBlockers: boolean,
   ): ActiveSearch {
+    this.searchCount++;
     const collapseBlockerStates =
       allowBlockers && this.prepared.demands.length >= 64;
     const ownedNodesForNet = this.getOwnedNodesForNet(demand.netId);
@@ -647,13 +700,27 @@ export class RipUpRubberBandSolver extends BaseSolver {
       this.targetHeuristicGeneration = 1;
     }
     const targetHeuristicGeneration = this.targetHeuristicGeneration;
+    const heuristicWeight =
+      this.prepared.options.routeOrder !== "adaptive" ||
+      this.prepared.demands.length >= 64
+        ? 1
+        : Math.min(
+            this.prepared.options.maxHeuristicWeight,
+            this.prepared.options.heuristicWeight +
+              this.negotiationPassCount * 0.05,
+          );
+    this.maximumHeuristicWeightUsed = Math.max(
+      this.maximumHeuristicWeightUsed,
+      heuristicWeight,
+    );
     const open = new MinHeap<number>();
     open.push(
-      this.heuristicToTargets(
-        sourceNode,
-        targetTreesByLayer,
-        targetHeuristicGeneration,
-      ),
+      heuristicWeight *
+        this.heuristicToTargets(
+          sourceNode,
+          targetTreesByLayer,
+          targetHeuristicGeneration,
+        ),
       0,
     );
     const preferredLayer = this.preferredLayerByRoute.get(demand.routeId);
@@ -670,33 +737,10 @@ export class RipUpRubberBandSolver extends BaseSolver {
       demand,
       escapeConstraints,
     );
-    const protectedCorridors = this.prepared.demands.flatMap((candidate) => {
-      if (
-        demand.connectionTerminalCount <= 2 ||
-        demand.connectionTerminalCount > 4 ||
-        directDistance < this.prepared.options.gridPitch * 4 ||
-        candidate.connectionTerminalCount !== 2 ||
-        candidate.netId === demand.netId
-      ) {
-        return [];
-      }
-      const from = this.prepared.nodes[candidate.sourceNode]!;
-      const to = this.prepared.nodes[candidate.targetNode]!;
-      const candidateDistance = pointDistance(from, to);
-      if (
-        candidateDistance < this.prepared.options.gridPitch * 2 ||
-        candidateDistance > this.prepared.options.gridPitch * 3 ||
-        segmentDistance(sourcePoint, targetPoint, from, to) > 1e-7
-      ) {
-        return [];
-      }
-      const minimumDistance = Math.max(
-        this.prepared.options.gridPitch / 2 -
-          this.prepared.options.gridClearance / 2,
-        demand.width / 2 + candidate.width / 2 + this.effectiveClearance,
-      );
-      return [{ from, to, minimumDistance }];
-    });
+    const protectedCorridors = this.getProtectedCorridors(
+      demand,
+      directDistance,
+    );
     const directCorridorPenaltyScale =
       demand.connectionTerminalCount === 2 &&
       escapeConstraints.length > 0 &&
@@ -737,6 +781,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
       targetNodes,
       targetTreesByLayer,
       targetHeuristicGeneration,
+      heuristicWeight,
       nodes: [initialNode],
       open,
       bestCostByState: new Map([[initialStateKey, 0]]),
@@ -766,8 +811,44 @@ export class RipUpRubberBandSolver extends BaseSolver {
     };
   }
 
+  private getProtectedCorridors(demand: RouteDemand, directDistance: number) {
+    const cached = this.protectedCorridorsByDemand.get(demand);
+    if (cached) return cached;
+    const sourcePoint = this.prepared.nodes[demand.sourceNode]!;
+    const targetPoint = this.prepared.nodes[demand.targetNode]!;
+    const protectedCorridors = this.prepared.demands.flatMap((candidate) => {
+      if (
+        demand.connectionTerminalCount <= 2 ||
+        demand.connectionTerminalCount > 4 ||
+        directDistance < this.prepared.options.gridPitch * 4 ||
+        candidate.connectionTerminalCount !== 2 ||
+        candidate.netId === demand.netId
+      ) {
+        return [];
+      }
+      const from = this.prepared.nodes[candidate.sourceNode]!;
+      const to = this.prepared.nodes[candidate.targetNode]!;
+      const candidateDistance = pointDistance(from, to);
+      if (
+        candidateDistance < this.prepared.options.gridPitch * 2 ||
+        candidateDistance > this.prepared.options.gridPitch * 3 ||
+        segmentDistance(sourcePoint, targetPoint, from, to) > 1e-7
+      ) {
+        return [];
+      }
+      const minimumDistance = Math.max(
+        this.prepared.options.gridPitch / 2 -
+          this.prepared.options.gridClearance / 2,
+        demand.width / 2 + candidate.width / 2 + this.effectiveClearance,
+      );
+      return [{ from, to, minimumDistance }];
+    });
+    this.protectedCorridorsByDemand.set(demand, protectedCorridors);
+    return protectedCorridors;
+  }
+
   private getOwnedNodesForNet(netId: string) {
-    return new Set(this.ownedNodeCountByNet.get(netId)?.keys() ?? []);
+    return this.ownedNodesByNet.get(netId) ?? NO_OWNED_NODES;
   }
 
   private getOwnedComponentsForNet(netId: string) {
@@ -871,6 +952,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
     if (!search) return;
     const searchNodeIndex = search.open.pop();
     if (searchNodeIndex === undefined) {
+      this.failedSearchCount++;
       if (!search.allowBlockers) {
         // Most routes have a free path, frequently by using the bottom layer
         // through fixed vias. Searching that zero-blocker state space first
@@ -880,7 +962,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
         return;
       }
       let exhaustedRouteCount = 0;
-      for (const ripCount of this.ripCountByRoute.values()) {
+      for (const ripCount of this.ripCountByRoute) {
         if (ripCount >= this.prepared.options.maxRipsPerRoute) {
           exhaustedRouteCount++;
         }
@@ -900,7 +982,9 @@ export class RipUpRubberBandSolver extends BaseSolver {
     }
     const current = search.nodes[searchNodeIndex]!;
     const bestCost = search.bestCostByState.get(current.stateKey);
-    if (bestCost === undefined || current.g > bestCost + 1e-9) return;
+    if (bestCost === undefined || current.g > bestCost + 1e-9) {
+      return;
+    }
     search.expanded++;
     this.totalExpandedStateCount++;
 
@@ -1037,40 +1121,40 @@ export class RipUpRubberBandSolver extends BaseSolver {
       return;
     }
 
-    let foreignOwners: string[];
+    let foreignOwnerIndexes: number[];
     if (
       this.foreignOwnerCacheGenerationByEdge[edgeId] ===
       search.foreignOwnerCacheGeneration
     ) {
       this.foreignOwnerCacheHitCount++;
-      foreignOwners = this.foreignOwnerCacheValues[edgeId]!;
+      foreignOwnerIndexes = this.foreignOwnerCacheValues[edgeId]!;
     } else {
       this.foreignOwnerCacheMissCount++;
-      foreignOwners = this.getForeignOwners(edge, search.demand);
+      foreignOwnerIndexes = this.getForeignOwnerIndexes(edge, search.demand);
       this.foreignOwnerCacheGenerationByEdge[edgeId] =
         search.foreignOwnerCacheGeneration;
-      this.foreignOwnerCacheValues[edgeId] = foreignOwners;
+      this.foreignOwnerCacheValues[edgeId] = foreignOwnerIndexes;
       search.foreignOwnerCacheEntryCount++;
     }
-    if (!search.allowBlockers && foreignOwners.length > 0) return;
+    if (!search.allowBlockers && foreignOwnerIndexes.length > 0) return;
     let newlyBlockedRouteCount = 0;
-    for (const routeId of foreignOwners) {
+    for (const routeIndex of foreignOwnerIndexes) {
       if (
-        (this.ripCountByRoute.get(routeId) ?? 0) >=
+        this.ripCountByRoute[routeIndex]! >=
         this.prepared.options.maxRipsPerRoute
       ) {
         return;
       }
-      if (!parent.blockers.includes(routeId)) newlyBlockedRouteCount++;
+      if (!parent.blockers.includes(routeIndex)) newlyBlockedRouteCount++;
     }
     const hasNewBlockers = newlyBlockedRouteCount > 0;
     const nextBlockers = hasNewBlockers
-      ? insertSortedUnique(parent.blockers, foreignOwners)
+      ? insertSortedUnique(parent.blockers, foreignOwnerIndexes)
       : parent.blockers;
     if (nextBlockers.length > this.prepared.options.maxBlockersPerSearch)
       return;
     const congestionBlockerCount = search.collapseBlockerStates
-      ? foreignOwners.length
+      ? foreignOwnerIndexes.length
       : newlyBlockedRouteCount;
     const blockerState = search.collapseBlockerStates
       ? 3
@@ -1108,7 +1192,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
         ? this.getNominalObstaclePenaltyCached(search, edgeId)
         : 0) +
       congestionBlockerCount * search.congestionCost +
-      foreignOwners.length * this.prepared.options.crossingCost;
+      foreignOwnerIndexes.length * this.prepared.options.crossingCost;
     const visitedPreferredLayer =
       parent.visitedPreferredLayer ||
       search.preferredLayer === undefined ||
@@ -1142,11 +1226,12 @@ export class RipUpRubberBandSolver extends BaseSolver {
     search.bestCostByState.set(key, nextG);
     search.open.push(
       nextG +
-        this.heuristicToTargets(
-          toNode,
-          search.targetTreesByLayer,
-          search.targetHeuristicGeneration,
-        ),
+        search.heuristicWeight *
+          this.heuristicToTargets(
+            toNode,
+            search.targetTreesByLayer,
+            search.targetHeuristicGeneration,
+          ),
       nextIndex,
     );
   }
@@ -1863,7 +1948,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
       : edge.conflictEdgeIds[index]!;
   }
 
-  private getForeignOwners(edge: RoutingEdge, demand: RouteDemand) {
+  private getForeignOwnerIndexes(edge: RoutingEdge, demand: RouteDemand) {
     if (
       this.nodeHasOwners[edge.fromNode] === 0 &&
       this.nodeHasOwners[edge.toNode] === 0 &&
@@ -1878,12 +1963,13 @@ export class RipUpRubberBandSolver extends BaseSolver {
       edge.kind === "trace" ? this.edgeOwners.get(edge.edgeId) : undefined;
     const occupancy =
       edge.kind === "trace" ? this.occupancyByEdge.get(edge.edgeId) : undefined;
-    const ownerRouteIds = new Set<string>();
-    const addForeign = (routeIds: Iterable<string> | undefined) => {
-      for (const routeId of routeIds ?? []) {
-        const ownerDemand = this.prepared.demandById.get(routeId);
-        if (!ownerDemand || ownerDemand.netId === demand.netId) continue;
-        ownerRouteIds.add(routeId);
+    const demandRouteIndex = this.routeIndexByDemand.get(demand)!;
+    const demandNetIndex = this.netIndexByRoute[demandRouteIndex]!;
+    const ownerRouteIndexes = new Set<number>();
+    const addForeign = (routeIndexes: Iterable<number> | undefined) => {
+      for (const routeIndex of routeIndexes ?? []) {
+        if (this.netIndexByRoute[routeIndex] === demandNetIndex) continue;
+        ownerRouteIndexes.add(routeIndex);
       }
     };
     addForeign(fromOwners);
@@ -1891,30 +1977,47 @@ export class RipUpRubberBandSolver extends BaseSolver {
     if (edge.kind === "trace") {
       addForeign(edgeOwners);
       if (occupancy) {
-        for (const [routeId, distances] of occupancy) {
-          if (ownerRouteIds.has(routeId)) continue;
-          const ownerDemand = this.prepared.demandById.get(routeId);
-          if (!ownerDemand || ownerDemand.netId === demand.netId) continue;
+        for (const [routeIndex, distances] of occupancy) {
+          if (
+            ownerRouteIndexes.has(routeIndex) ||
+            this.netIndexByRoute[routeIndex] === demandNetIndex
+          )
+            continue;
           const minimumCenterDistance =
-            demand.width / 2 + ownerDemand.width / 2 + this.effectiveClearance;
+            demand.width / 2 +
+            this.widthByRoute[routeIndex]! / 2 +
+            this.effectiveClearance;
           for (const distance of distances) {
             if (distance < minimumCenterDistance - 1e-7) {
-              ownerRouteIds.add(routeId);
+              ownerRouteIndexes.add(routeIndex);
               break;
             }
           }
         }
       }
     }
-    if (ownerRouteIds.size === 0) return NO_BLOCKERS;
-    if (ownerRouteIds.size === 1) return [ownerRouteIds.values().next().value!];
-    return [...ownerRouteIds].sort();
+    if (ownerRouteIndexes.size === 0) return NO_BLOCKERS;
+    if (ownerRouteIndexes.size === 1)
+      return [ownerRouteIndexes.values().next().value!];
+    return [...ownerRouteIndexes].sort((left, right) => left - right);
+  }
+
+  private getForeignOwners(edge: RoutingEdge, demand: RouteDemand) {
+    return this.getForeignOwnerIndexes(edge, demand).map(
+      (routeIndex) => this.routeIdByIndex[routeIndex]!,
+    );
   }
 
   private commitGoal(search: ActiveSearch, goalIndex: number) {
     const goal = search.nodes[goalIndex]!;
-    const shouldRipImmediately =
-      this.totalRipCount < this.prepared.demands.length * 2;
+    const routeIndex = this.routeIndexByDemand.get(search.demand)!;
+    const immediateRipMultiplier =
+      this.prepared.demands.length >= 20 && this.prepared.demands.length < 64
+        ? 1
+        : 2;
+    const immediateRipLimit =
+      this.prepared.demands.length * immediateRipMultiplier;
+    const shouldRipImmediately = this.totalRipCount < immediateRipLimit;
     if (
       shouldRipImmediately &&
       this.totalRipCount + goal.blockers.length >
@@ -1925,7 +2028,10 @@ export class RipUpRubberBandSolver extends BaseSolver {
       );
       return;
     }
-    for (const blockerRouteId of shouldRipImmediately ? goal.blockers : []) {
+    const blockerRouteIds = goal.blockers.map(
+      (blockerRouteIndex) => this.routeIdByIndex[blockerRouteIndex]!,
+    );
+    for (const blockerRouteId of shouldRipImmediately ? blockerRouteIds : []) {
       const blockerRoute = this.committed.get(blockerRouteId);
       for (const edgeId of blockerRoute?.edgePath ?? []) {
         this.historyCostByEdge[edgeId]! +=
@@ -1937,7 +2043,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
       }
     }
     const invalidatedRouteIds = this.uncommitRouteClosure(
-      shouldRipImmediately ? goal.blockers : [],
+      shouldRipImmediately ? blockerRouteIds : [],
     );
     if (this.failed) return;
     for (const routeId of invalidatedRouteIds) {
@@ -1963,7 +2069,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
       netId: search.demand.netId,
       nodePath,
       edgePath,
-      blockerRouteIds: goal.blockers,
+      blockerRouteIds,
     };
     const dependencies = new Set<string>();
     if (nodePath.length === 1) {
@@ -1973,7 +2079,8 @@ export class RipUpRubberBandSolver extends BaseSolver {
         }
       }
     } else {
-      for (const ownerRouteId of this.nodeOwners.get(goal.graphNode) ?? []) {
+      for (const ownerRouteIndex of this.nodeOwners.get(goal.graphNode) ?? []) {
+        const ownerRouteId = this.routeIdByIndex[ownerRouteIndex]!;
         if (this.committed.get(ownerRouteId)?.netId === route.netId) {
           dependencies.add(ownerRouteId);
         }
@@ -1984,12 +2091,16 @@ export class RipUpRubberBandSolver extends BaseSolver {
     const ownedNodeCounts =
       this.ownedNodeCountByNet.get(route.netId) ?? new Map<number, number>();
     this.ownedNodeCountByNet.set(route.netId, ownedNodeCounts);
+    const ownedNodes =
+      this.ownedNodesByNet.get(route.netId) ?? new Set<number>();
+    this.ownedNodesByNet.set(route.netId, ownedNodes);
     for (const nodeIndex of nodePath) {
-      const owners = this.nodeOwners.get(nodeIndex) ?? new Set<string>();
-      owners.add(route.routeId);
+      const owners = this.nodeOwners.get(nodeIndex) ?? new Set<number>();
+      owners.add(routeIndex);
       this.nodeOwners.set(nodeIndex, owners);
       this.nodeHasOwners[nodeIndex] = 1;
       ownedNodeCounts.set(nodeIndex, (ownedNodeCounts.get(nodeIndex) ?? 0) + 1);
+      ownedNodes.add(nodeIndex);
     }
     for (const edgeId of edgePath) {
       const edge = this.prepared.edges[edgeId]!;
@@ -1997,8 +2108,8 @@ export class RipUpRubberBandSolver extends BaseSolver {
         this.committedFixedViaTransitionCount++;
         continue;
       }
-      const owners = this.edgeOwners.get(edgeId) ?? new Set<string>();
-      owners.add(route.routeId);
+      const owners = this.edgeOwners.get(edgeId) ?? new Set<number>();
+      owners.add(routeIndex);
       this.edgeOwners.set(edgeId, owners);
       this.edgeHasOwners[edgeId] = 1;
       const conflictDistances = this.getConflictDistances(edge);
@@ -2011,10 +2122,10 @@ export class RipUpRubberBandSolver extends BaseSolver {
           this.occupancyByEdge.set(conflictEdgeId, occupancy);
           this.edgeHasConflictOccupancy[conflictEdgeId] = 1;
         }
-        let distances = occupancy.get(route.routeId);
+        let distances = occupancy.get(routeIndex);
         if (!distances) {
           distances = [];
-          occupancy.set(route.routeId, distances);
+          occupancy.set(routeIndex, distances);
         }
         distances.push(conflictDistances[index]!);
       }
@@ -2025,6 +2136,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
   private uncommitRoute(routeId: string) {
     const route = this.committed.get(routeId);
     if (!route) return;
+    const routeIndex = this.routeIndexById.get(routeId)!;
     for (const edgeId of route.edgePath) {
       const edge = this.prepared.edges[edgeId]!;
       if (edge.kind !== "trace") {
@@ -2032,7 +2144,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
         continue;
       }
       const owners = this.edgeOwners.get(edgeId);
-      owners?.delete(routeId);
+      owners?.delete(routeIndex);
       if (owners?.size === 0) {
         this.edgeOwners.delete(edgeId);
         this.edgeHasOwners[edgeId] = 0;
@@ -2041,10 +2153,10 @@ export class RipUpRubberBandSolver extends BaseSolver {
       for (let index = 0; index < conflictCount; index++) {
         const conflictEdgeId = this.getConflictEdgeId(edge, index);
         const occupancy = this.occupancyByEdge.get(conflictEdgeId);
-        const distances = occupancy?.get(routeId);
+        const distances = occupancy?.get(routeIndex);
         if (!distances) continue;
         if (distances.length <= 1) {
-          occupancy!.delete(routeId);
+          occupancy!.delete(routeIndex);
           if (occupancy!.size === 0) {
             this.occupancyByEdge.delete(conflictEdgeId);
             this.edgeHasConflictOccupancy[conflictEdgeId] = 0;
@@ -2055,25 +2167,25 @@ export class RipUpRubberBandSolver extends BaseSolver {
       }
     }
     const ownedNodeCounts = this.ownedNodeCountByNet.get(route.netId);
+    const ownedNodes = this.ownedNodesByNet.get(route.netId);
     for (const nodeIndex of route.nodePath) {
       const owners = this.nodeOwners.get(nodeIndex);
-      owners?.delete(routeId);
+      owners?.delete(routeIndex);
       if (owners?.size === 0) {
         this.nodeOwners.delete(nodeIndex);
         this.nodeHasOwners[nodeIndex] = 0;
       }
       const count = ownedNodeCounts?.get(nodeIndex);
       if (count !== undefined) {
-        if (count <= 1) ownedNodeCounts!.delete(nodeIndex);
-        else ownedNodeCounts!.set(nodeIndex, count - 1);
+        if (count <= 1) {
+          ownedNodeCounts!.delete(nodeIndex);
+          ownedNodes?.delete(nodeIndex);
+        } else ownedNodeCounts!.set(nodeIndex, count - 1);
       }
     }
     this.committed.delete(routeId);
     this.routeDependenciesByRoute.delete(routeId);
-    this.ripCountByRoute.set(
-      routeId,
-      (this.ripCountByRoute.get(routeId) ?? 0) + 1,
-    );
+    this.ripCountByRoute[routeIndex]!++;
     this.totalRipCount++;
     if (this.totalRipCount > this.prepared.options.maxTotalRips) {
       this.fail(
@@ -2657,8 +2769,10 @@ export class RipUpRubberBandSolver extends BaseSolver {
           ) {
             continue;
           }
-          for (const candidateRouteId of this.edgeOwners.get(candidateEdgeId) ??
-            []) {
+          for (const candidateRouteIndex of this.edgeOwners.get(
+            candidateEdgeId,
+          ) ?? []) {
+            const candidateRouteId = this.routeIdByIndex[candidateRouteIndex]!;
             const candidateRoute = this.committed.get(candidateRouteId);
             if (candidateRoute?.netId !== route.netId) continue;
             union(route.netId, edge.fromNode, candidateEdge.fromNode);
@@ -2696,6 +2810,8 @@ export class RipUpRubberBandSolver extends BaseSolver {
       adaptivePriorityChangeCount: this.adaptivePriorityChangeCount,
       maximumActiveSearchNodeCount: this.maximumActiveSearchNodeCount,
       maximumOpenHeapSize: this.maximumOpenHeapSize,
+      searchCount: this.searchCount,
+      failedSearchCount: this.failedSearchCount,
       maximumForeignOwnerCacheEntries: this.maximumForeignOwnerCacheEntries,
       nodeAllowanceCacheHitCount: this.nodeAllowanceCacheHitCount,
       nodeAllowanceCacheMissCount: this.nodeAllowanceCacheMissCount,
@@ -2705,6 +2821,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
       foreignOwnerCacheMissCount: this.foreignOwnerCacheMissCount,
       targetHeuristicCacheHitCount: this.targetHeuristicCacheHitCount,
       targetHeuristicCacheMissCount: this.targetHeuristicCacheMissCount,
+      maximumHeuristicWeight: this.maximumHeuristicWeightUsed,
       activeRouteId: this.activeSearch?.demand.routeId ?? null,
       activeExpandedStateCount: this.activeSearch?.expanded ?? 0,
     };

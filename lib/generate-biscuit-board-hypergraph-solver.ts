@@ -54,7 +54,9 @@ const DEFAULT_OPTIONS: NormalizedBiscuitBoardAutorouterOptions = {
   maxRipsPerRoute: 1_000,
   maxTotalRips: 10_000,
   maxSearchStates: 500_000,
-  expansionsPerStep: 300,
+  expansionsPerStep: 3_000,
+  heuristicWeight: 1.25,
+  maxHeuristicWeight: 1.5,
   conflictWorkerCount: 1,
 };
 
@@ -76,6 +78,8 @@ const normalizeOptions = (
     "maxTotalRips",
     "maxSearchStates",
     "expansionsPerStep",
+    "heuristicWeight",
+    "maxHeuristicWeight",
   ] as const) {
     if (!Number.isFinite(normalized[key]) || normalized[key] <= 0) {
       throw new Error(`options.${key} must be greater than zero`);
@@ -92,6 +96,11 @@ const normalizeOptions = (
     normalized.crossingCost < 0
   ) {
     throw new Error("options.crossingCost must be non-negative");
+  }
+  if (normalized.maxHeuristicWeight < normalized.heuristicWeight) {
+    throw new Error(
+      "options.maxHeuristicWeight must be at least options.heuristicWeight",
+    );
   }
   if (
     !Number.isInteger(normalized.conflictWorkerCount) ||
