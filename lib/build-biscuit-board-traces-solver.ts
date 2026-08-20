@@ -228,6 +228,8 @@ export class BuildBiscuitBoardTracesSolver extends BaseSolver {
     const protectedNodeIndexes = new Set<number>();
     for (const route of this.routed.routes) {
       const demand = this.prepared.demandById.get(route.routeId)!;
+      protectedNodeIndexes.add(demand.sourceNode);
+      protectedNodeIndexes.add(demand.targetNode);
       for (const endpointNode of [route.nodePath[0], route.nodePath.at(-1)]) {
         if (
           endpointNode !== undefined &&

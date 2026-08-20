@@ -21,8 +21,8 @@ export default function Repro08Page() {
           {` ${input.connections.length} connections · ${routeDemandCount} routing demands · ${input.obstacles.length} obstacles`}
         </div>
         <div style={{ color: "#475569", fontSize: 13, marginTop: 4 }}>
-          The completed source_net_1 route contains a top-layer branch ending at
-          (-15.8, 18.5375), where there is no terminal or same-net junction.
+          The captured source_net_1 route previously left a top-layer branch at
+          (-15.8, 18.5375), where there was no terminal or same-net junction.
         </div>
       </header>
       <GenericSolverDebugger

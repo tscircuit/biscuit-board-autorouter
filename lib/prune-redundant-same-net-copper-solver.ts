@@ -115,8 +115,17 @@ const getTraceEndpoints = (trace: SimplifiedPcbTrace) => {
   return wires.length === 0 ? [] : [wires[0]!, wires.at(-1)!];
 };
 
-const getTraceEndpointKeys = (trace: SimplifiedPcbTrace) =>
-  getTraceEndpoints(trace).map(vertexKey);
+const getDemandTerminalKeys = (
+  prepared: PreparedBiscuitRoutingProblem,
+  solution: BiscuitBoardRoutingSolution,
+  traceIndex: number,
+) => {
+  const demand = prepared.demandById.get(solution.routes[traceIndex]!.routeId)!;
+  return [
+    vertexKey(prepared.nodes[demand.sourceNode]!),
+    vertexKey(prepared.nodes[demand.targetNode]!),
+  ] as const;
+};
 
 const addSplitRatio = (segment: RawWireSegment, ratio: number) => {
   if (ratio < -EPSILON || ratio > 1 + EPSILON) return;
@@ -499,8 +508,8 @@ const pathToTrace = (
     ...original,
     connectsTo: [
       ...new Set([
-        ...(original.connectsTo ?? []).filter(
-          (id) => !prepared.fixedViaById.has(id),
+        ...[demand.sourcePointId, demand.targetPointId].filter(
+          (id): id is string => Boolean(id),
         ),
         ...usedViaIds,
       ]),
@@ -531,7 +540,7 @@ export const pruneRedundantSameNetCopper = (
     );
     if (!graphHasCycle(graph)) continue;
     const terminalKeys = indexes.flatMap((index) =>
-      getTraceEndpointKeys(solution.traces[index]!),
+      getDemandTerminalKeys(prepared, solution, index),
     );
     const selectedEdges = selectTerminalTree(graph, terminalKeys);
     const originalNetTraces = indexes.map((index) => traces[index]!);
@@ -547,14 +556,13 @@ export const pruneRedundantSameNetCopper = (
       ].some((edge) => !selectedEdges.has(edge));
       if (!originalUsesPrunedEdge) continue;
       const demand = prepared.demandById.get(solution.routes[index]!.routeId)!;
-      const [source, target] = getTraceEndpointKeys(solution.traces[index]!);
-      if (!source || !target) continue;
+      const [source, target] = getDemandTerminalKeys(prepared, solution, index);
       traces[index] = pathToTrace(
         prepared,
         demand,
         solution.traces[index]!,
         graph,
-        findTreePath(graph, selectedEdges, source!, target!),
+        findTreePath(graph, selectedEdges, source, target),
         source,
       );
     }

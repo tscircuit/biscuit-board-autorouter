@@ -1121,6 +1121,8 @@ const postProcessBiscuitBoardTracesOnce = (
   const protectedJunctionKeys = new Set<string>();
   for (const route of solution.routes) {
     const demand = prepared.demandById.get(route.routeId)!;
+    protectedJunctionKeys.add(junctionKey(prepared.nodes[demand.sourceNode]!));
+    protectedJunctionKeys.add(junctionKey(prepared.nodes[demand.targetNode]!));
     for (const endpointNode of [route.nodePath[0], route.nodePath.at(-1)]) {
       if (
         endpointNode !== undefined &&
