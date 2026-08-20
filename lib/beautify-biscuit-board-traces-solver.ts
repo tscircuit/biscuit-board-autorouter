@@ -335,6 +335,7 @@ const createParallelConsolidationCandidate = (
   }
 
   const followsAnchorDirection = segmentEndProjection > segmentStartProjection;
+  const travelDirection = followsAnchorDirection ? 1 : -1;
   const entryProjection = followsAnchorDirection ? overlapStart : overlapEnd;
   const exitProjection = followsAnchorDirection ? overlapEnd : overlapStart;
   const pointOnAnchor = (projection: number): Point => ({
@@ -347,8 +348,10 @@ const createParallelConsolidationCandidate = (
   });
   const candidateEntry = pointOnSegment(entryProjection);
   const candidateExit = pointOnSegment(exitProjection);
-  const anchorEntry = pointOnAnchor(entryProjection);
-  const anchorExit = pointOnAnchor(exitProjection);
+  // Advance by the lane offset while crossing that offset so both transitions
+  // meet the shared centerline at 45 degrees.
+  const anchorEntry = pointOnAnchor(entryProjection + travelDirection * offset);
+  const anchorExit = pointOnAnchor(exitProjection - travelDirection * offset);
   const corridor = [candidateEntry, candidateExit, anchorExit, anchorEntry];
   if (
     !parallelCorridorIsEmpty(
@@ -383,7 +386,7 @@ const createParallelConsolidationCandidate = (
   return {
     route: candidateRoute,
     overlapLength,
-    lengthReduction: -2 * offset,
+    lengthReduction: segmentLength - wirePathLength(replacement),
   };
 };
 

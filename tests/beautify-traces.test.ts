@@ -315,13 +315,71 @@ test("beautification combines unobstructed parallel same-net spans", () => {
 
   expect(
     getLongestSharedHorizontalRun(beautified.traces[0]!, beautified.traces[1]!),
-  ).toBeGreaterThan(3.9);
+  ).toBeCloseTo(2, 7);
   expect(beautified.stats.sameNetConsolidationCount).toBeGreaterThan(0);
   for (const [traceIndex, trace] of beautified.traces.entries()) {
     expect(trace.route[0]).toEqual(solution.traces[traceIndex]!.route[0]);
     expect(trace.route.at(-1)).toEqual(
       solution.traces[traceIndex]!.route.at(-1),
     );
+  }
+});
+
+test("parallel same-net consolidation uses 45-degree approaches at shared junctions", () => {
+  const input: SimpleRouteJson = {
+    bounds: { minX: 0, minY: 0, maxX: 10, maxY: 8 },
+    layerCount: 1,
+    minTraceWidth: 0.1,
+    obstacles: [],
+    connections: [
+      {
+        name: "anchor-ground",
+        netConnectionName: "GND",
+        pointsToConnect: [
+          { x: 2, y: 3, layer: "top", pointId: "anchor-left" },
+          { x: 8, y: 3, layer: "top", pointId: "anchor-right" },
+        ],
+      },
+      {
+        name: "offset-ground",
+        netConnectionName: "GND",
+        pointsToConnect: [
+          { x: 2, y: 5, layer: "top", pointId: "offset-left" },
+          { x: 8, y: 5, layer: "top", pointId: "offset-right" },
+        ],
+      },
+    ],
+  };
+  const { prepared, solution } = createSolution(input, [
+    [
+      { x: 2, y: 3 },
+      { x: 8, y: 3 },
+    ],
+    [
+      { x: 2, y: 5 },
+      { x: 8, y: 5 },
+    ],
+  ]);
+
+  const beautified = beautifyBiscuitBoardTraces(prepared, solution);
+  const approachSegments = beautified.traces[0]!.route.slice(1).flatMap(
+    (end, index) => {
+      const start = beautified.traces[0]!.route[index]!;
+      if (
+        start.route_type !== "wire" ||
+        end.route_type !== "wire" ||
+        Math.abs(start.y - end.y) <= 1e-7
+      ) {
+        return [];
+      }
+      return [{ start, end }];
+    },
+  );
+
+  expect(beautified.stats.sameNetConsolidationCount).toBeGreaterThan(0);
+  expect(approachSegments.length).toBeGreaterThan(0);
+  for (const { start, end } of approachSegments) {
+    expect(Math.abs(end.x - start.x)).toBeCloseTo(Math.abs(end.y - start.y), 7);
   }
 });
 
