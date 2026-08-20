@@ -39,6 +39,15 @@ export class BiscuitBoardRoutingPipelineSolver extends BasePipelineSolver<Simple
           throw new Error("Hypergraph generation produced no output");
         return [prepared];
       },
+      {
+        onSolved: (instance: BiscuitBoardRoutingPipelineSolver) => {
+          const graphStats = instance.getSolver("generate-hypergraph")?.stats;
+          const routed = instance.getStageOutput<BiscuitBoardRoutingSolution>(
+            "route-with-rip-and-replace",
+          );
+          if (graphStats && routed) Object.assign(routed.stats, graphStats);
+        },
+      },
     ),
     definePipelineStep(
       "build-and-validate-traces",
@@ -54,6 +63,10 @@ export class BiscuitBoardRoutingPipelineSolver extends BasePipelineSolver<Simple
           throw new Error("Routing pipeline stages produced no output");
         }
         return [{ prepared, routed }];
+      },
+      {
+        onSolved: (instance: BiscuitBoardRoutingPipelineSolver) =>
+          instance.releaseStages("route-with-rip-and-replace"),
       },
     ),
     definePipelineStep(
@@ -71,6 +84,10 @@ export class BiscuitBoardRoutingPipelineSolver extends BasePipelineSolver<Simple
         }
         return [{ prepared, built }];
       },
+      {
+        onSolved: (instance: BiscuitBoardRoutingPipelineSolver) =>
+          instance.releaseStages("build-and-validate-traces"),
+      },
     ),
     definePipelineStep(
       "beautify-traces",
@@ -86,6 +103,10 @@ export class BiscuitBoardRoutingPipelineSolver extends BasePipelineSolver<Simple
           throw new Error("Trace beautification inputs are unavailable");
         }
         return [{ prepared, built }];
+      },
+      {
+        onSolved: (instance: BiscuitBoardRoutingPipelineSolver) =>
+          instance.releaseStages("post-process-traces"),
       },
     ),
     definePipelineStep(
@@ -103,6 +124,10 @@ export class BiscuitBoardRoutingPipelineSolver extends BasePipelineSolver<Simple
           throw new Error("Same-net topology cleanup inputs are unavailable");
         }
         return [{ prepared, built }];
+      },
+      {
+        onSolved: (instance: BiscuitBoardRoutingPipelineSolver) =>
+          instance.releaseStages("beautify-traces"),
       },
     ),
     definePipelineStep(
@@ -126,6 +151,13 @@ export class BiscuitBoardRoutingPipelineSolver extends BasePipelineSolver<Simple
           },
         ];
       },
+      {
+        onSolved: (instance: BiscuitBoardRoutingPipelineSolver) =>
+          instance.releaseStages(
+            "prune-redundant-same-net-copper",
+            "generate-hypergraph",
+          ),
+      },
     ),
   ];
 
@@ -148,6 +180,18 @@ export class BiscuitBoardRoutingPipelineSolver extends BasePipelineSolver<Simple
 
   get stage() {
     return this.getCurrentStageName();
+  }
+
+  private releaseStages(...stageNames: string[]) {
+    if (this.options.retainIntermediateStages !== false) return;
+    const solverProperties = this as unknown as Record<string, unknown>;
+    for (const stageName of stageNames) {
+      delete this.pipelineOutputs[stageName];
+      delete solverProperties[stageName];
+    }
+    if (this.solved || this.getCurrentStageName() === "expand-traces") {
+      delete solverProperties["expand-traces"];
+    }
   }
 
   override initialVisualize(): GraphicsObject {

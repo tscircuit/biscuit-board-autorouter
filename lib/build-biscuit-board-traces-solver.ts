@@ -67,11 +67,15 @@ const expandSharedNetRoute = (
 
   const nodePath = [demand.targetNode];
   const edgePath: number[] = [];
-  while (nodePath[0] !== demand.sourceNode) {
-    const entry = previous.get(nodePath[0]!)!;
-    nodePath.unshift(entry.nodeIndex);
-    edgePath.unshift(entry.edgeId);
+  let currentNode = demand.targetNode;
+  while (currentNode !== demand.sourceNode) {
+    const entry = previous.get(currentNode)!;
+    nodePath.push(entry.nodeIndex);
+    edgePath.push(entry.edgeId);
+    currentNode = entry.nodeIndex;
   }
+  nodePath.reverse();
+  edgePath.reverse();
   return { ...route, nodePath, edgePath };
 };
 
@@ -80,7 +84,7 @@ const collapseCollinearNodes = (
   nodePath: number[],
   protectedNodeIndexes: ReadonlySet<number>,
 ) => {
-  if (nodePath.length <= 2) return [...nodePath];
+  if (nodePath.length <= 2) return nodePath.slice();
   const result = [nodePath[0]!];
   for (let index = 1; index < nodePath.length - 1; index++) {
     const previous = prepared.nodes[result[result.length - 1]!]!;
@@ -109,16 +113,19 @@ const routeToTrace = (
   protectedNodeIndexes: ReadonlySet<number>,
 ): SimplifiedPcbTrace => {
   const demand = prepared.demandById.get(route.routeId)!;
-  const usedPrefabViaIds = [
-    ...route.edgePath.flatMap((edgeId) => {
-      const edge = prepared.edges[edgeId]!;
-      return edge.kind === "fixed_via_transition" ? [edge.prefabViaId] : [];
-    }),
-    ...route.nodePath.flatMap((nodeIndex) => {
-      const prefabViaId = prepared.nodes[nodeIndex]!.prefabViaId;
-      return prefabViaId ? [prefabViaId] : [];
-    }),
-  ];
+  const connectedPointIds = new Set<string>();
+  if (demand.sourcePointId) connectedPointIds.add(demand.sourcePointId);
+  if (demand.targetPointId) connectedPointIds.add(demand.targetPointId);
+  for (const edgeId of route.edgePath) {
+    const edge = prepared.edges[edgeId]!;
+    if (edge.kind === "fixed_via_transition") {
+      connectedPointIds.add(edge.prefabViaId);
+    }
+  }
+  for (const nodeIndex of route.nodePath) {
+    const prefabViaId = prepared.nodes[nodeIndex]!.prefabViaId;
+    if (prefabViaId) connectedPointIds.add(prefabViaId);
+  }
   const nodePath = collapseCollinearNodes(
     prepared,
     route.nodePath,
@@ -163,15 +170,7 @@ const routeToTrace = (
     type: "pcb_trace",
     pcb_trace_id: `pcb_trace_${sanitizeId(route.routeId)}`,
     connection_name: route.connectionName,
-    connectsTo: [
-      ...new Set(
-        [
-          demand.sourcePointId,
-          demand.targetPointId,
-          ...usedPrefabViaIds,
-        ].filter((pointId): pointId is string => Boolean(pointId)),
-      ),
-    ],
+    connectsTo: Array.from(connectedPointIds),
     route: outputRoute,
   };
 };

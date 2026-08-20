@@ -361,11 +361,13 @@ const createParallelConsolidationCandidate = (
     createWirePoint(segment.start, candidateExit),
     segment.end,
   ];
-  const candidateRoute = removeConsecutiveDuplicateWirePoints([
-    ...route.slice(0, segment.startRouteIndex),
+  const replacedRoute = route.slice();
+  replacedRoute.splice(
+    segment.startRouteIndex,
+    segment.endRouteIndex - segment.startRouteIndex + 1,
     ...replacement,
-    ...route.slice(segment.endRouteIndex + 1),
-  ]);
+  );
+  const candidateRoute = removeConsecutiveDuplicateWirePoints(replacedRoute);
   if (routeGeometryEqual(route, candidateRoute)) return null;
   if (!routeHasClearance(candidateRoute)) {
     return null;
@@ -486,19 +488,25 @@ const consolidateSameNetTraces = (
                 .map(pointKey)
                 .filter((key) => protectedJunctionKeys.has(key)),
             );
-            if (
-              [...removedJunctionKeys].some(
-                (key) => !replacement.some((point) => pointKey(point) === key),
-              )
-            ) {
+            let removesProtectedJunction = false;
+            for (const key of removedJunctionKeys) {
+              if (!replacement.some((point) => pointKey(point) === key)) {
+                removesProtectedJunction = true;
+                break;
+              }
+            }
+            if (removesProtectedJunction) {
               continue;
             }
 
-            const candidateRoute = removeConsecutiveDuplicateWirePoints([
-              ...route.slice(0, first.routeIndex),
+            const replacedRoute = route.slice();
+            replacedRoute.splice(
+              first.routeIndex,
+              second.routeIndex - first.routeIndex + 1,
               ...replacement,
-              ...route.slice(second.routeIndex + 1),
-            ]);
+            );
+            const candidateRoute =
+              removeConsecutiveDuplicateWirePoints(replacedRoute);
             if (routeGeometryEqual(route, candidateRoute)) continue;
             if (!routeHasClearance(candidateRoute)) {
               continue;
@@ -576,12 +584,9 @@ const createChamferedRoute = (
   distance: number,
 ) => {
   const { entry, exit } = createChamferPoints(route, cornerIndex, distance);
-  return removeConsecutiveDuplicateWirePoints([
-    ...route.slice(0, cornerIndex),
-    entry,
-    exit,
-    ...route.slice(cornerIndex + 1),
-  ]);
+  const chamferedRoute = route.slice();
+  chamferedRoute.splice(cornerIndex, 1, entry, exit);
+  return removeConsecutiveDuplicateWirePoints(chamferedRoute);
 };
 
 const createChamferSegments = (

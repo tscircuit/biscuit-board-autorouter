@@ -33,8 +33,10 @@ The architecture follows the same separation used by
 immutable topology, compact incidence data, and mutable route ownership.
 Tiny-hypergraph's angle-pair cache avoids repeatedly testing geometry inside a
 region. Here, the equivalent hot-loop optimization is a precomputed conflict
-list on each trace hyperedge. A* checks route owners through those lists rather
-than recomputing segment intersections for every candidate.
+index. Generated conflicts use one CSR offset table and one packed ID buffer;
+custom test graphs may still use mutable per-edge lists. A* checks incremental
+route occupancy through that index rather than recomputing segment
+intersections for every candidate.
 
 Simple Route JSON may express one electrical net as several connections that
 share a terminal. The generator coalesces those connections before ownership
@@ -71,7 +73,9 @@ simplification architecture in `tscircuit/tscircuit-autorouter`: the farthest
 clear candidate is committed while the remaining routed traces are treated as
 immutable copper. Every candidate segment is checked independently against the
 same clearance model, and the complete output is validated again before it is
-returned.
+returned. Static obstacles and foreign-net segments are indexed by layer in a
+uniform spatial hash, so exact geometry is evaluated only for nearby
+candidates.
 
 ## Trace beautification
 

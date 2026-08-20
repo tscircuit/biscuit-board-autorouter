@@ -415,8 +415,8 @@ const findTreePath = (
     { vertex: CopperVertexId; edge: CopperEdge }
   >();
   const visited = new Set([source]);
-  while (queue.length > 0) {
-    const current = queue.shift()!;
+  for (let queueIndex = 0; queueIndex < queue.length; queueIndex++) {
+    const current = queue[queueIndex]!;
     if (current === target) break;
     for (const edge of graph.adjacency.get(current) ?? []) {
       if (!selectedEdges.has(edge.key)) continue;

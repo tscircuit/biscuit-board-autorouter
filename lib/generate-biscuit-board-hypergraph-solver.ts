@@ -19,6 +19,7 @@ import type {
   Point,
   PrefabricatedVia,
   PreparedBiscuitRoutingProblem,
+  RectBounds,
   RouteDemand,
   RoutingEdge,
   RoutingNode,
@@ -169,44 +170,67 @@ const graphUsesRotatedObstacleBounds = (
     options.gridPitch,
   );
 
-const getSpecialNodeMetadata = (
+interface SpecialNodeMetadata {
+  terminalPointIds: string[];
+  terminalConnectionNames: string[];
+  prefabVia?: PrefabricatedVia;
+}
+
+interface IndexedRoutingObstacle {
+  obstacleIndex: number;
+  obstacle: SimpleRouteJson["obstacles"][number];
+  traceBounds: RectBounds;
+  nominalBounds: RectBounds;
+}
+
+const EMPTY_SPECIAL_NODE_METADATA: SpecialNodeMetadata = {
+  terminalPointIds: [],
+  terminalConnectionNames: [],
+};
+
+const buildSpecialNodeMetadataByKey = (
   input: SimpleRouteJson,
   prefabricatedVias: PrefabricatedVia[],
-  layer: string,
-  point: Point,
 ) => {
-  const terminalPointIds: string[] = [];
-  const terminalConnectionNames: string[] = [];
+  const metadataByKey = new Map<string, SpecialNodeMetadata>();
+  const getOrCreate = (layer: string, point: Point) => {
+    const key = nodeKey(layer, point.x, point.y);
+    let metadata = metadataByKey.get(key);
+    if (!metadata) {
+      metadata = { terminalPointIds: [], terminalConnectionNames: [] };
+      metadataByKey.set(key, metadata);
+    }
+    return metadata;
+  };
   for (const connection of input.connections) {
     for (const terminal of connection.pointsToConnect) {
       const terminalLayers = terminal.layers ?? [terminal.layer];
-      if (terminalLayers.includes(layer) && pointsEqual(terminal, point)) {
-        if (terminal.pointId) terminalPointIds.push(terminal.pointId);
-        terminalConnectionNames.push(connection.name);
+      for (const layer of terminalLayers) {
+        const metadata = getOrCreate(layer, terminal);
+        if (
+          terminal.pointId &&
+          !metadata.terminalPointIds.includes(terminal.pointId)
+        ) {
+          metadata.terminalPointIds.push(terminal.pointId);
+        }
+        if (!metadata.terminalConnectionNames.includes(connection.name)) {
+          metadata.terminalConnectionNames.push(connection.name);
+        }
       }
     }
   }
-  const prefabVia = prefabricatedVias.find(
-    (via) => via.layers.includes(layer) && pointsEqual(via, point),
-  );
-  return {
-    terminalPointIds: [...new Set(terminalPointIds)],
-    terminalConnectionNames: [...new Set(terminalConnectionNames)],
-    prefabVia,
-  };
+  for (const via of prefabricatedVias) {
+    for (const layer of via.layers) getOrCreate(layer, via).prefabVia = via;
+  }
+  return metadataByKey;
 };
 
 const nodeIsBlocked = (
-  input: SimpleRouteJson,
-  layer: string,
+  obstacles: IndexedRoutingObstacle[],
   point: Point,
-  margin: number,
-  special: ReturnType<typeof getSpecialNodeMetadata>,
-  options: HypergraphGenerationOptions,
+  special: SpecialNodeMetadata,
 ) =>
-  input.obstacles.some((obstacle, obstacleIndex) => {
-    if (obstacle.isCopperPour || !obstacleIsOnLayer(obstacle, layer))
-      return false;
+  obstacles.some(({ obstacle, obstacleIndex, traceBounds }) => {
     if (special.prefabVia?.obstacleIndex === obstacleIndex) return false;
     if (
       special.terminalConnectionNames.some((connectionName) =>
@@ -221,50 +245,22 @@ const nodeIsBlocked = (
     // Preserve the established sparse graph topology here. Exact rotated
     // envelopes are applied after simplification, where a local detour does
     // not force an unrelated whole-board rip-up negotiation.
-    return pointStrictlyInsideRect(
-      point,
-      obstacleBounds(
-        obstacle,
-        margin,
-        graphUsesRotatedObstacleBounds(
-          input,
-          obstacle,
-          obstacleIndex,
-          margin,
-          options,
-        ),
-      ),
-    );
+    return pointStrictlyInsideRect(point, traceBounds);
   });
 
 const getBlockingObstacleIndexes = (
-  input: SimpleRouteJson,
-  layer: string,
+  obstacles: IndexedRoutingObstacle[],
   start: RoutingNode,
   end: RoutingNode,
-  margin: number,
-  options: HypergraphGenerationOptions,
-) =>
-  input.obstacles.flatMap((obstacle, obstacleIndex) => {
-    if (obstacle.isCopperPour || !obstacleIsOnLayer(obstacle, layer)) return [];
-    return segmentIntersectsRectInterior(
-      start,
-      end,
-      obstacleBounds(
-        obstacle,
-        margin,
-        graphUsesRotatedObstacleBounds(
-          input,
-          obstacle,
-          obstacleIndex,
-          margin,
-          options,
-        ),
-      ),
-    )
-      ? [obstacleIndex]
-      : [];
-  });
+) => {
+  const blockingObstacleIndexes: number[] = [];
+  for (const { obstacleIndex, nominalBounds } of obstacles) {
+    if (segmentIntersectsRectInterior(start, end, nominalBounds)) {
+      blockingObstacleIndexes.push(obstacleIndex);
+    }
+  }
+  return blockingObstacleIndexes;
+};
 
 const buildPointTreePairs = <T extends Point>(points: T[]) => {
   if (points.length < 2) return [] as Array<[T, T]>;
@@ -345,9 +341,19 @@ const buildDemands = (
     connectionNames.push(connection.name);
     groupConnectionNames.set(root, connectionNames);
   });
+
+  const netIdByRoot = new Map<number, string>();
+  const connectionNamesByRoot = new Map<number, string[]>();
+  for (const [root, names] of groupNames) {
+    const uniqueNames = Array.from(new Set(names));
+    uniqueNames.sort();
+    netIdByRoot.set(root, uniqueNames[0]!);
+  }
+  for (const [root, names] of groupConnectionNames) {
+    connectionNamesByRoot.set(root, Array.from(new Set(names)));
+  }
   const netIdByConnectionIndex = input.connections.map(
-    (_, connectionIndex) =>
-      [...new Set(groupNames.get(find(connectionIndex)) ?? [])].sort()[0]!,
+    (_, connectionIndex) => netIdByRoot.get(find(connectionIndex))!,
   );
 
   const demands: RouteDemand[] = [];
@@ -389,9 +395,8 @@ const buildDemands = (
         routeId: `${connection.name}:${branchIndex++}`,
         connectionName: connection.name,
         connectionTerminalCount: connection.pointsToConnect.length,
-        allowedConnectionNames: [
-          ...new Set(groupConnectionNames.get(find(connectionIndex)) ?? []),
-        ],
+        allowedConnectionNames:
+          connectionNamesByRoot.get(find(connectionIndex)) ?? [],
         netId: netIdByConnectionIndex[connectionIndex]!,
         sourceNode: bestConnected.node!,
         targetNode: target.node!,
@@ -409,11 +414,49 @@ const buildDemands = (
   return demands;
 };
 
-const addConflictPairs = (
+class ConflictPairList {
+  private static readonly CHUNK_SIZE = 1 << 20;
+  private readonly chunks: Uint32Array[] = [
+    new Uint32Array(ConflictPairList.CHUNK_SIZE),
+  ];
+  private valueCount = 0;
+
+  push(firstEdgeId: number, secondEdgeId: number) {
+    this.setNext(firstEdgeId);
+    this.setNext(secondEdgeId);
+  }
+
+  forEach(visit: (firstEdgeId: number, secondEdgeId: number) => void) {
+    for (let offset = 0; offset < this.valueCount; offset += 2) {
+      visit(this.get(offset), this.get(offset + 1));
+    }
+  }
+
+  private setNext(value: number) {
+    const chunkIndex = Math.floor(
+      this.valueCount / ConflictPairList.CHUNK_SIZE,
+    );
+    if (!this.chunks[chunkIndex]) {
+      this.chunks.push(new Uint32Array(ConflictPairList.CHUNK_SIZE));
+    }
+    this.chunks[chunkIndex]![this.valueCount % ConflictPairList.CHUNK_SIZE] =
+      value;
+    this.valueCount++;
+  }
+
+  private get(index: number) {
+    return this.chunks[Math.floor(index / ConflictPairList.CHUNK_SIZE)]![
+      index % ConflictPairList.CHUNK_SIZE
+    ]!;
+  }
+}
+
+const collectConflictPairs = (
   edges: RoutingEdge[],
   nodes: RoutingNode[],
   minimumTraceCenterDistance: number,
 ) => {
+  const conflictPairs = new ConflictPairList();
   const traceEdges = edges.filter(
     (edge): edge is Extract<RoutingEdge, { kind: "trace" }> =>
       edge.kind === "trace",
@@ -485,8 +528,7 @@ const addConflictPairs = (
             segmentDistance(from, to, candidateFrom, candidateTo) <
               minimumTraceCenterDistance - 1e-7
           ) {
-            edge.conflictEdgeIds.push(candidateId);
-            candidate.conflictEdgeIds.push(edge.edgeId);
+            conflictPairs.push(edge.edgeId, candidateId);
           }
         }
       }
@@ -500,6 +542,32 @@ const addConflictPairs = (
       }
     }
   }
+  return conflictPairs;
+};
+
+const compactConflictPairs = (
+  edges: RoutingEdge[],
+  conflictPairs: ConflictPairList,
+) => {
+  const conflictCountByEdge = new Uint32Array(edges.length);
+  conflictPairs.forEach((firstEdgeId, secondEdgeId) => {
+    conflictCountByEdge[firstEdgeId]!++;
+    conflictCountByEdge[secondEdgeId]!++;
+  });
+  const conflictOffsets = new Uint32Array(edges.length + 1);
+  for (let edgeId = 0; edgeId < edges.length; edgeId++) {
+    conflictOffsets[edgeId + 1] =
+      conflictOffsets[edgeId]! + conflictCountByEdge[edgeId]!;
+  }
+  const compactConflictEdgeIds = new Uint32Array(conflictOffsets[edges.length]);
+  const writeOffsets = conflictOffsets.slice(0, edges.length);
+  conflictPairs.forEach((firstEdgeId, secondEdgeId) => {
+    compactConflictEdgeIds[writeOffsets[firstEdgeId]!] = secondEdgeId;
+    writeOffsets[firstEdgeId]!++;
+    compactConflictEdgeIds[writeOffsets[secondEdgeId]!] = firstEdgeId;
+    writeOffsets[secondEdgeId]!++;
+  });
+  return { conflictOffsets, compactConflictEdgeIds };
 };
 
 const buildBiscuitBoardHypergraph = (
@@ -521,6 +589,10 @@ const buildBiscuitBoardHypergraph = (
   };
   const layers = getLayers(input);
   const prefabricatedVias = getPrefabricatedVias(input);
+  const specialNodeMetadataByKey = buildSpecialNodeMetadataByKey(
+    input,
+    prefabricatedVias,
+  );
   const maximumTraceWidth = Math.max(
     input.minTraceWidth,
     ...input.connections.map(
@@ -548,6 +620,52 @@ const buildBiscuitBoardHypergraph = (
     maximumNominalTraceWidth / 2 + effectiveClearance;
   const boardEdgeMargin =
     (input.minBoardEdgeClearance ?? 0) + input.minTraceWidth / 2;
+  const routingObstaclesByLayer = new Map<string, IndexedRoutingObstacle[]>();
+  const obstacleIndexesByIdentifier = new Map<string, number[]>();
+  for (const [obstacleIndex, obstacle] of input.obstacles.entries()) {
+    if (obstacle.isCopperPour) continue;
+    const traceBounds = obstacleBounds(
+      obstacle,
+      maximumTraceMargin,
+      graphUsesRotatedObstacleBounds(
+        input,
+        obstacle,
+        obstacleIndex,
+        maximumTraceMargin,
+        options,
+      ),
+    );
+    const nominalBounds =
+      maximumNominalTraceMargin === maximumTraceMargin
+        ? traceBounds
+        : obstacleBounds(
+            obstacle,
+            maximumNominalTraceMargin,
+            graphUsesRotatedObstacleBounds(
+              input,
+              obstacle,
+              obstacleIndex,
+              maximumNominalTraceMargin,
+              options,
+            ),
+          );
+    const indexedObstacle = {
+      obstacleIndex,
+      obstacle,
+      traceBounds,
+      nominalBounds,
+    };
+    for (const layer of obstacle.layers) {
+      const layerObstacles = routingObstaclesByLayer.get(layer);
+      if (layerObstacles) layerObstacles.push(indexedObstacle);
+      else routingObstaclesByLayer.set(layer, [indexedObstacle]);
+    }
+    for (const identifier of obstacle.connectedTo) {
+      const indexes = obstacleIndexesByIdentifier.get(identifier);
+      if (indexes) indexes.push(obstacleIndex);
+      else obstacleIndexesByIdentifier.set(identifier, [obstacleIndex]);
+    }
+  }
   const baseXCoordinates = [
     input.bounds.minX + boardEdgeMargin,
     input.bounds.maxX - boardEdgeMargin,
@@ -639,16 +757,21 @@ const buildBiscuitBoardHypergraph = (
         connection.rootConnectionName,
         point.pointId,
       ].filter((identifier): identifier is string => Boolean(identifier));
-      for (const [obstacleIndex, obstacle] of input.obstacles.entries()) {
-        const matchesConnection = terminalIdentifiers.some((identifier) =>
-          obstacle.connectedTo.includes(identifier),
-        );
+      const terminalObstacleIndexSet = new Set<number>();
+      for (const identifier of terminalIdentifiers) {
+        for (const obstacleIndex of obstacleIndexesByIdentifier.get(
+          identifier,
+        ) ?? []) {
+          terminalObstacleIndexSet.add(obstacleIndex);
+        }
+      }
+      const terminalObstacleIndexes = Array.from(terminalObstacleIndexSet);
+      terminalObstacleIndexes.sort((left, right) => left - right);
+      for (const obstacleIndex of terminalObstacleIndexes) {
+        const obstacle = input.obstacles[obstacleIndex]!;
         const matchesTerminal =
           Math.abs(obstacle.center.x - point.x) <= 1e-7 &&
           Math.abs(obstacle.center.y - point.y) <= 1e-7;
-        if (obstacle.isCopperPour || !matchesConnection) {
-          continue;
-        }
         const escapeBounds = [maximumTraceMargin];
         if (maximumNominalTraceMargin > maximumTraceMargin + 1e-7) {
           // Keep the physical-width boundary as a fallback, while adding a
@@ -826,12 +949,9 @@ const buildBiscuitBoardHypergraph = (
   for (const layer of layers) {
     for (const point of graphPoints) {
       const { x, y } = point;
-      const special = getSpecialNodeMetadata(
-        input,
-        prefabricatedVias,
-        layer,
-        point,
-      );
+      const special =
+        specialNodeMetadataByKey.get(nodeKey(layer, x, y)) ??
+        EMPTY_SPECIAL_NODE_METADATA;
       if (
         !isInsideBounds(
           input,
@@ -845,12 +965,9 @@ const buildBiscuitBoardHypergraph = (
       }
       if (
         nodeIsBlocked(
-          input,
-          layer,
+          routingObstaclesByLayer.get(layer) ?? [],
           point,
-          maximumTraceMargin,
           special,
-          options,
         ) &&
         special.terminalConnectionNames.length === 0 &&
         !special.prefabVia
@@ -876,11 +993,12 @@ const buildBiscuitBoardHypergraph = (
       nodeIndexByKey.set(nodeKey(layer, x, y), nodeIndex);
       const rowKey = `${layer}:${coordinateKey(y)}`;
       const columnKey = `${layer}:${coordinateKey(x)}`;
-      rowNodes.set(rowKey, [...(rowNodes.get(rowKey) ?? []), nodeIndex]);
-      columnNodes.set(columnKey, [
-        ...(columnNodes.get(columnKey) ?? []),
-        nodeIndex,
-      ]);
+      const row = rowNodes.get(rowKey);
+      if (row) row.push(nodeIndex);
+      else rowNodes.set(rowKey, [nodeIndex]);
+      const column = columnNodes.get(columnKey);
+      if (column) column.push(nodeIndex);
+      else columnNodes.set(columnKey, [nodeIndex]);
     }
   }
 
@@ -944,12 +1062,9 @@ const buildBiscuitBoardHypergraph = (
       // the rip-up solver can prefer expansion-safe paths without removing
       // narrower fallback paths from the graph.
       blockingObstacleIndexes: getBlockingObstacleIndexes(
-        input,
-        from.layer,
+        routingObstaclesByLayer.get(from.layer) ?? [],
         from,
         to,
-        maximumNominalTraceMargin,
-        options,
       ),
       conflictEdgeIds: [],
       restrictedToConnectionName,
@@ -1027,7 +1142,15 @@ const buildBiscuitBoardHypergraph = (
     }
   }
 
-  addConflictPairs(edges, nodes, maximumTraceWidth + effectiveClearance);
+  const conflictPairs = collectConflictPairs(
+    edges,
+    nodes,
+    maximumTraceWidth + effectiveClearance,
+  );
+  const { conflictOffsets, compactConflictEdgeIds } = compactConflictPairs(
+    edges,
+    conflictPairs,
+  );
   const demands = buildDemands(input, nodeIndexByKey);
   return {
     input,
@@ -1037,6 +1160,8 @@ const buildBiscuitBoardHypergraph = (
     nodes,
     edges,
     adjacency,
+    conflictOffsets,
+    compactConflictEdgeIds,
     demands,
     demandById: new Map(demands.map((demand) => [demand.routeId, demand])),
     prefabricatedVias,
@@ -1132,6 +1257,27 @@ export class GenerateBiscuitBoardHypergraphSolver extends BaseSolver {
     this.stats = {
       graphNodeCount: this.output.nodes.length,
       graphEdgeCount: this.output.edges.length,
+      graphConflictReferenceCount:
+        this.output.compactConflictEdgeIds?.length ??
+        this.output.edges.reduce(
+          (count, edge) =>
+            count + (edge.kind === "trace" ? edge.conflictEdgeIds.length : 0),
+          0,
+        ),
+      graphMaximumConflictCount: this.output.edges.reduce((maximum, edge) => {
+        if (edge.kind !== "trace") return maximum;
+        const offsets = this.output!.conflictOffsets;
+        const count = offsets
+          ? offsets[edge.edgeId + 1]! - offsets[edge.edgeId]!
+          : edge.conflictEdgeIds.length;
+        return Math.max(maximum, count);
+      }, 0),
+      graphBlockingObstacleReferenceCount: this.output.edges.reduce(
+        (count, edge) =>
+          count +
+          (edge.kind === "trace" ? edge.blockingObstacleIndexes.length : 0),
+        0,
+      ),
       prefabricatedViaCount: this.output.prefabricatedVias.length,
       automaticallyReservedRotatedObstacleCount:
         detectedRotatedObstacleIndexes.length,

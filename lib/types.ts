@@ -36,6 +36,8 @@ export interface BiscuitBoardAutorouterOptions {
   expansionsPerStep?: number;
   /** Expand routed copper toward its nominal width after clearance cleanup. */
   expandTraces?: boolean;
+  /** Keep completed stage solvers and outputs for debugger visualization. */
+  retainIntermediateStages?: boolean;
 }
 
 export interface NormalizedBiscuitBoardAutorouterOptions {
@@ -79,6 +81,7 @@ export type RoutingEdge =
       toNode: number;
       cost: number;
       blockingObstacleIndexes: number[];
+      /** Mutable fallback used by custom/test graphs; generated graphs use the compact fields on the prepared problem. */
       conflictEdgeIds: number[];
       restrictedToConnectionName?: string;
       restrictedGuideOrder?: number;
@@ -133,6 +136,10 @@ export interface PreparedBiscuitRoutingProblem {
   nodes: RoutingNode[];
   edges: RoutingEdge[];
   adjacency: RoutingAdjacency[][];
+  /** CSR offsets into compactConflictEdgeIds for generated trace-edge conflicts. */
+  conflictOffsets?: Uint32Array;
+  /** Compact trace-edge conflict IDs. */
+  compactConflictEdgeIds?: Uint32Array;
   demands: RouteDemand[];
   demandById: Map<string, RouteDemand>;
   prefabricatedVias: PrefabricatedVia[];
@@ -157,9 +164,17 @@ export interface BiscuitBoardRoutingStats {
   fixedViaTransitionCount: number;
   graphNodeCount: number;
   graphEdgeCount: number;
+  graphConflictReferenceCount?: number;
+  graphMaximumConflictCount?: number;
+  graphBlockingObstacleReferenceCount?: number;
   negotiationPassCount?: number;
   conflictRouteCount?: number;
   adaptivePriorityChangeCount?: number;
+  maximumActiveSearchNodeCount?: number;
+  maximumOpenHeapSize?: number;
+  maximumForeignOwnerCacheEntries?: number;
+  activeRouteId?: string | null;
+  activeExpandedStateCount?: number;
   postProcessedClearance?: number;
   preSimplificationSegmentCount?: number;
   postSimplificationSegmentCount?: number;

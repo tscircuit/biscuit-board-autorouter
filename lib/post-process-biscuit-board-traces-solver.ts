@@ -12,6 +12,7 @@ import {
   segmentToObstacleDistance,
 } from "./geometry";
 import { RipUpRubberBandSolver } from "./rip-up-rubber-band-solver";
+import { SpatialHashIndex } from "./spatial-hash-index";
 import type {
   BiscuitBoardRoutingSolution,
   Point,
@@ -41,6 +42,16 @@ interface BoundedTraceSegment extends TraceSegment {
   maxY: number;
 }
 
+interface IndexedObstacle {
+  obstacleIndex: number;
+  obstacle: SimpleRouteJson["obstacles"][number];
+}
+
+interface IndexedClearanceSegment {
+  contextIndex: number;
+  segment: BoundedTraceSegment;
+}
+
 const withSegmentBounds = (segment: TraceSegment): BoundedTraceSegment => ({
   ...segment,
   minX: Math.min(segment.start.x, segment.end.x),
@@ -48,6 +59,38 @@ const withSegmentBounds = (segment: TraceSegment): BoundedTraceSegment => ({
   maxX: Math.max(segment.start.x, segment.end.x),
   maxY: Math.max(segment.start.y, segment.end.y),
 });
+
+const expandedSegmentBounds = (
+  segment: BoundedTraceSegment | TraceSegment,
+  padding: number,
+) => ({
+  minX: Math.min(segment.start.x, segment.end.x) - padding,
+  minY: Math.min(segment.start.y, segment.end.y) - padding,
+  maxX: Math.max(segment.start.x, segment.end.x) + padding,
+  maxY: Math.max(segment.start.y, segment.end.y) + padding,
+});
+
+const createObstacleIndexes = (
+  prepared: PreparedBiscuitRoutingProblem,
+  respectObstacleRotation: boolean,
+) => {
+  const indexes = new Map<string, SpatialHashIndex<IndexedObstacle>>();
+  const cellSize = Math.max(1, prepared.options.gridPitch * 4);
+  for (const [obstacleIndex, obstacle] of prepared.input.obstacles.entries()) {
+    if (obstacle.isCopperPour) continue;
+    const indexed = { obstacleIndex, obstacle };
+    const bounds = obstacleBounds(obstacle, 0, respectObstacleRotation);
+    for (const layer of obstacle.layers) {
+      let index = indexes.get(layer);
+      if (!index) {
+        index = new SpatialHashIndex(cellSize);
+        indexes.set(layer, index);
+      }
+      index.add(bounds, indexed);
+    }
+  }
+  return indexes;
+};
 
 const axisGap = (
   firstMin: number,
@@ -188,102 +231,121 @@ export const getTraceClearanceViolations = (
     getSegments(context.trace).map(withSegmentBounds),
   );
   const violations: TraceClearanceViolation[] = [];
+  const obstacleIndexes = createObstacleIndexes(
+    prepared,
+    respectObstacleRotation,
+  );
 
   for (const [contextIndex, context] of contexts.entries()) {
     for (const segment of segmentsByTrace[contextIndex]!) {
-      for (const [
-        obstacleIndex,
-        obstacle,
-      ] of prepared.input.obstacles.entries()) {
-        if (
-          obstacle.isCopperPour ||
-          !obstacle.layers.includes(segment.start.layer)
-        ) {
-          continue;
-        }
-        const minimumDistance = segment.start.width / 2 + clearance - EPSILON;
-        if (
-          segmentToObstacleDistance(
-            segment.start,
-            segment.end,
-            obstacle,
-            respectObstacleRotation,
-          ) >= minimumDistance ||
-          obstacleAllowsSegment(
-            prepared,
-            context,
+      const minimumDistance = segment.start.width / 2 + clearance - EPSILON;
+      obstacleIndexes
+        .get(segment.start.layer)
+        ?.forEach(expandedSegmentBounds(segment, minimumDistance), (entry) => {
+          const { obstacleIndex, obstacle } = entry;
+          if (
+            segmentToObstacleDistance(
+              segment.start,
+              segment.end,
+              obstacle,
+              respectObstacleRotation,
+            ) >= minimumDistance ||
+            obstacleAllowsSegment(
+              prepared,
+              context,
+              obstacleIndex,
+              segment,
+              connectionNameResolver,
+              true,
+            )
+          ) {
+            return;
+          }
+          violations.push({
+            kind: "obstacle",
+            traceId: context.trace.pcb_trace_id,
             obstacleIndex,
-            segment,
-            connectionNameResolver,
-            true,
-          )
-        ) {
-          continue;
-        }
-        violations.push({
-          kind: "obstacle",
-          traceId: context.trace.pcb_trace_id,
-          obstacleIndex,
-          otherId:
-            obstacle.obstacleId ??
-            obstacle.componentId ??
-            `obstacle-${obstacleIndex}`,
-          message: `Trace "${context.route.routeId}" is within ${clearance}mm of obstacle ${obstacleIndex}`,
+            otherId:
+              obstacle.obstacleId ??
+              obstacle.componentId ??
+              `obstacle-${obstacleIndex}`,
+            message: `Trace "${context.route.routeId}" is within ${clearance}mm of obstacle ${obstacleIndex}`,
+          });
         });
-      }
     }
   }
 
+  const segmentIndexes = new Map<
+    string,
+    SpatialHashIndex<IndexedClearanceSegment>
+  >();
+  const cellSize = Math.max(1, prepared.options.gridPitch * 4);
+  let maximumTraceRadius = 0;
+  for (const [contextIndex, segments] of segmentsByTrace.entries()) {
+    for (const segment of segments) {
+      maximumTraceRadius = Math.max(
+        maximumTraceRadius,
+        segment.start.width / 2,
+      );
+      let index = segmentIndexes.get(segment.start.layer);
+      if (!index) {
+        index = new SpatialHashIndex(cellSize);
+        segmentIndexes.set(segment.start.layer, index);
+      }
+      index.add(segment, { contextIndex, segment });
+    }
+  }
   for (let firstIndex = 0; firstIndex < contexts.length; firstIndex++) {
     const first = contexts[firstIndex]!;
-    for (
-      let secondIndex = firstIndex + 1;
-      secondIndex < contexts.length;
-      secondIndex++
-    ) {
-      const second = contexts[secondIndex]!;
-      if (first.demand.netId === second.demand.netId) continue;
-      for (const firstSegment of segmentsByTrace[firstIndex]!) {
-        for (const secondSegment of segmentsByTrace[secondIndex]!) {
-          if (firstSegment.start.layer !== secondSegment.start.layer) continue;
-          const minimumCenterDistance =
-            firstSegment.start.width / 2 +
-            secondSegment.start.width / 2 +
-            clearance;
-          const violationDistance = minimumCenterDistance - EPSILON;
-          if (
-            axisGap(
-              firstSegment.minX,
-              firstSegment.maxX,
-              secondSegment.minX,
-              secondSegment.maxX,
-            ) >= violationDistance ||
-            axisGap(
-              firstSegment.minY,
-              firstSegment.maxY,
-              secondSegment.minY,
-              secondSegment.maxY,
-            ) >= violationDistance
-          ) {
-            continue;
-          }
-          if (
-            segmentDistance(
-              firstSegment.start,
-              firstSegment.end,
-              secondSegment.start,
-              secondSegment.end,
-            ) < violationDistance
-          ) {
-            violations.push({
-              kind: "trace",
-              traceId: first.trace.pcb_trace_id,
-              otherId: second.trace.pcb_trace_id,
-              message: `Traces "${first.route.routeId}" and "${second.route.routeId}" are closer than ${clearance}mm`,
-            });
-          }
-        }
-      }
+    for (const firstSegment of segmentsByTrace[firstIndex]!) {
+      const queryPadding =
+        firstSegment.start.width / 2 + maximumTraceRadius + clearance;
+      segmentIndexes
+        .get(firstSegment.start.layer)
+        ?.forEach(
+          expandedSegmentBounds(firstSegment, queryPadding),
+          ({ contextIndex: secondIndex, segment: secondSegment }) => {
+            if (secondIndex <= firstIndex) return;
+            const second = contexts[secondIndex]!;
+            if (first.demand.netId === second.demand.netId) return;
+            const minimumCenterDistance =
+              firstSegment.start.width / 2 +
+              secondSegment.start.width / 2 +
+              clearance;
+            const violationDistance = minimumCenterDistance - EPSILON;
+            if (
+              axisGap(
+                firstSegment.minX,
+                firstSegment.maxX,
+                secondSegment.minX,
+                secondSegment.maxX,
+              ) >= violationDistance ||
+              axisGap(
+                firstSegment.minY,
+                firstSegment.maxY,
+                secondSegment.minY,
+                secondSegment.maxY,
+              ) >= violationDistance
+            ) {
+              return;
+            }
+            if (
+              segmentDistance(
+                firstSegment.start,
+                firstSegment.end,
+                secondSegment.start,
+                secondSegment.end,
+              ) < violationDistance
+            ) {
+              violations.push({
+                kind: "trace",
+                traceId: first.trace.pcb_trace_id,
+                otherId: second.trace.pcb_trace_id,
+                message: `Traces "${first.route.routeId}" and "${second.route.routeId}" are closer than ${clearance}mm`,
+              });
+            }
+          },
+        );
     }
   }
 
@@ -303,83 +365,114 @@ export const createSegmentClearanceChecker = (
     solution.traces,
   );
   const context = contexts[traceIndex]!;
-  const blockingTraceSegments = contexts.flatMap((other, otherIndex) =>
-    otherIndex === traceIndex || other.demand.netId === context.demand.netId
-      ? []
-      : getSegments(other.trace).map(withSegmentBounds),
+  const obstacleIndexes = createObstacleIndexes(
+    prepared,
+    respectObstacleRotation,
   );
+  const blockingSegmentIndexes = new Map<
+    string,
+    SpatialHashIndex<BoundedTraceSegment>
+  >();
+  const cellSize = Math.max(1, prepared.options.gridPitch * 4);
+  let maximumBlockingTraceRadius = 0;
+  for (const [otherIndex, other] of contexts.entries()) {
+    if (
+      otherIndex === traceIndex ||
+      other.demand.netId === context.demand.netId
+    )
+      continue;
+    for (const otherSegment of getSegments(other.trace).map(
+      withSegmentBounds,
+    )) {
+      maximumBlockingTraceRadius = Math.max(
+        maximumBlockingTraceRadius,
+        otherSegment.start.width / 2,
+      );
+      let index = blockingSegmentIndexes.get(otherSegment.start.layer);
+      if (!index) {
+        index = new SpatialHashIndex(cellSize);
+        blockingSegmentIndexes.set(otherSegment.start.layer, index);
+      }
+      index.add(otherSegment, otherSegment);
+    }
+  }
 
   return (segment: TraceSegment) => {
-    for (const [
-      obstacleIndex,
-      obstacle,
-    ] of prepared.input.obstacles.entries()) {
-      if (
-        obstacle.isCopperPour ||
-        !obstacle.layers.includes(segment.start.layer)
-      ) {
-        continue;
-      }
-      const expandedBounds = obstacleBounds(
-        obstacle,
-        segment.start.width / 2 + clearance,
-        respectObstacleRotation,
-      );
-      if (
-        !segmentIntersectsRectInterior(
-          segment.start,
-          segment.end,
-          expandedBounds,
-        ) ||
-        obstacleAllowsSegment(
-          prepared,
-          context,
-          obstacleIndex,
-          segment,
-          connectionNameResolver,
-        )
-      ) {
-        continue;
-      }
-      return false;
-    }
-    const segmentMinX = Math.min(segment.start.x, segment.end.x);
-    const segmentMinY = Math.min(segment.start.y, segment.end.y);
-    const segmentMaxX = Math.max(segment.start.x, segment.end.x);
-    const segmentMaxY = Math.max(segment.start.y, segment.end.y);
-    for (const otherSegment of blockingTraceSegments) {
-      if (otherSegment.start.layer !== segment.start.layer) continue;
-      const minimumCenterDistance =
-        segment.start.width / 2 + otherSegment.start.width / 2 + clearance;
-      const violationDistance = minimumCenterDistance - EPSILON;
-      if (
-        axisGap(
-          segmentMinX,
-          segmentMaxX,
-          otherSegment.minX,
-          otherSegment.maxX,
-        ) >= violationDistance ||
-        axisGap(
-          segmentMinY,
-          segmentMaxY,
-          otherSegment.minY,
-          otherSegment.maxY,
-        ) >= violationDistance
-      ) {
-        continue;
-      }
-      if (
-        segmentDistance(
-          segment.start,
-          segment.end,
-          otherSegment.start,
-          otherSegment.end,
-        ) < violationDistance
-      ) {
-        return false;
-      }
-    }
-    return true;
+    const obstaclePadding = segment.start.width / 2 + clearance;
+    const obstaclesClear =
+      obstacleIndexes
+        .get(segment.start.layer)
+        ?.forEach(
+          expandedSegmentBounds(segment, obstaclePadding),
+          ({ obstacleIndex, obstacle }) => {
+            const expandedBounds = obstacleBounds(
+              obstacle,
+              obstaclePadding,
+              respectObstacleRotation,
+            );
+            if (
+              !segmentIntersectsRectInterior(
+                segment.start,
+                segment.end,
+                expandedBounds,
+              ) ||
+              obstacleAllowsSegment(
+                prepared,
+                context,
+                obstacleIndex,
+                segment,
+                connectionNameResolver,
+              )
+            ) {
+              return;
+            }
+            return false;
+          },
+        ) ?? true;
+    if (!obstaclesClear) return false;
+    const boundedSegment = withSegmentBounds(segment);
+    const traceQueryPadding =
+      segment.start.width / 2 + maximumBlockingTraceRadius + clearance;
+    return (
+      blockingSegmentIndexes
+        .get(segment.start.layer)
+        ?.forEach(
+          expandedSegmentBounds(segment, traceQueryPadding),
+          (otherSegment) => {
+            const minimumCenterDistance =
+              segment.start.width / 2 +
+              otherSegment.start.width / 2 +
+              clearance;
+            const violationDistance = minimumCenterDistance - EPSILON;
+            if (
+              axisGap(
+                boundedSegment.minX,
+                boundedSegment.maxX,
+                otherSegment.minX,
+                otherSegment.maxX,
+              ) >= violationDistance ||
+              axisGap(
+                boundedSegment.minY,
+                boundedSegment.maxY,
+                otherSegment.minY,
+                otherSegment.maxY,
+              ) >= violationDistance
+            ) {
+              return;
+            }
+            if (
+              segmentDistance(
+                segment.start,
+                segment.end,
+                otherSegment.start,
+                otherSegment.end,
+              ) < violationDistance
+            ) {
+              return false;
+            }
+          },
+        ) ?? true
+    );
   };
 };
 
@@ -530,7 +623,9 @@ const simplifyWireRun = (
         `Trace simplification could not preserve the validated segment after point ${tailIndex}`,
       );
     }
-    simplified.push(...acceptedPath.slice(1));
+    for (let index = 1; index < acceptedPath.length; index++) {
+      simplified.push(acceptedPath[index]!);
+    }
     tailIndex = acceptedHeadIndex;
   }
 
@@ -575,13 +670,19 @@ const simplifyTraceRoute = (
         segmentHasClearance,
       );
       const previous = simplified.at(-1);
-      simplified.push(
-        ...(previous?.route_type === "wire" &&
+      const firstPointIndex =
+        previous?.route_type === "wire" &&
         pointsEqual(previous, simplifiedChunk[0]!) &&
         previous.layer === simplifiedChunk[0]!.layer
-          ? simplifiedChunk.slice(1)
-          : simplifiedChunk),
-      );
+          ? 1
+          : 0;
+      for (
+        let simplifiedIndex = firstPointIndex;
+        simplifiedIndex < simplifiedChunk.length;
+        simplifiedIndex++
+      ) {
+        simplified.push(simplifiedChunk[simplifiedIndex]!);
+      }
       chunkStartIndex = index;
     }
     pointIndex = runEndIndex;
@@ -641,7 +742,7 @@ const repairRotatedObstacleClearance = (
     const contexts = getTraceContexts(prepared, workingSolution);
 
     for (const [traceIndex, context] of contexts.entries()) {
-      const route = [...context.trace.route];
+      const route = context.trace.route.slice();
       const segmentHasClearance = createSegmentClearanceChecker(
         prepared,
         workingSolution,
@@ -661,8 +762,14 @@ const repairRotatedObstacleClearance = (
           continue;
         }
         const segment = { start, end };
-        const blockingEntry = [...prepared.input.obstacles.entries()].find(
-          ([obstacleIndex, obstacle]) =>
+        let blockingEntry:
+          | [number, (typeof prepared.input.obstacles)[number]]
+          | undefined;
+        for (const [
+          obstacleIndex,
+          obstacle,
+        ] of prepared.input.obstacles.entries()) {
+          if (
             Math.abs(obstacle.ccwRotationDegrees ?? 0) > EPSILON &&
             !obstacle.isCopperPour &&
             obstacle.layers.includes(start.layer) &&
@@ -677,8 +784,12 @@ const repairRotatedObstacleClearance = (
               start,
               end,
               obstacleBounds(obstacle, start.width / 2 + clearance),
-            ),
-        );
+            )
+          ) {
+            blockingEntry = [obstacleIndex, obstacle];
+            break;
+          }
+        }
         if (!blockingEntry) continue;
 
         const [blockingObstacleIndex, obstacle] = blockingEntry;
@@ -1067,7 +1178,7 @@ const repairTraceClearance = (
               const detour = candidates[0];
               if (!detour) continue;
 
-              const route = [...traces[attempt.traceIndex]!.route];
+              const route = traces[attempt.traceIndex]!.route.slice();
               route.splice(attempt.pointIndex - 1, 2, ...detour);
               traces[attempt.traceIndex] = {
                 ...traces[attempt.traceIndex]!,

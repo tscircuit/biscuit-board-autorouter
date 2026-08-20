@@ -30,7 +30,10 @@ export class BiscuitBoardAutorouter implements GenericLocalAutorouter {
     public readonly input: SimpleRouteJson,
     options: BiscuitBoardAutorouterOptions = {},
   ) {
-    this.solver = new BiscuitBoardRoutingPipelineSolver(input, options);
+    this.solver = new BiscuitBoardRoutingPipelineSolver(input, {
+      retainIntermediateStages: false,
+      ...options,
+    });
   }
 
   solveSync(): SimplifiedPcbTrace[] {

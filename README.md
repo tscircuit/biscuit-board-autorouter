@@ -65,8 +65,20 @@ bun run dev
 bun run build
 bun run test
 bun run format:check
+bun run perf:ladder
 ./benchmark.sh --debug
 ```
+
+`perf:ladder` runs six isolated cases from a tiny route through the RP2040
+stress board. It reports wall time, process CPU time, stage timings, peak heap
+and RSS, search high-water marks, graph density, route count, manufactured-via
+count, and final clearance violations. Use `--case=stm32 --runs=3` to isolate a
+rung or `--max-ms=90000` to give the stress case a longer budget.
+
+Direct `BiscuitBoardRoutingPipelineSolver` instances retain completed stages
+for debugger visualization by default. Set `retainIntermediateStages: false`
+for a result-only pipeline. `BiscuitBoardAutorouter` uses this low-memory mode
+unless explicitly overridden.
 
 Cosmos exposes the generated hypergraph and every live pipeline stage through
 `GenericSolverDebugger`:

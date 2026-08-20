@@ -39,6 +39,8 @@ test("adaptive priority responds to live endpoint constraints", () => {
     ),
   ];
   prepared.edges = [];
+  prepared.conflictOffsets = undefined;
+  prepared.compactConflictEdgeIds = undefined;
   prepared.adjacency = Array.from({ length: prepared.nodes.length }, () => []);
   const addEdge = (fromNode: number, toNode: number) => {
     const edgeId = prepared.edges.length;

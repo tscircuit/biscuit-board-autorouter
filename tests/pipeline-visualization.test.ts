@@ -38,3 +38,19 @@ test("every pipeline stage exposes a meaningful visualization", () => {
     expect(graphicPrimitiveCount(graphics)).toBeGreaterThan(0);
   }
 });
+
+test("low-memory mode releases completed stage solvers and outputs", () => {
+  const pipeline = new BiscuitBoardRoutingPipelineSolver(
+    forcedPrefabricatedViaFixture,
+    { expandTraces: false, retainIntermediateStages: false },
+  );
+
+  pipeline.solve();
+
+  expect(pipeline.solved).toBe(true);
+  expect(pipeline.getOutput()?.traces).toHaveLength(1);
+  expect(pipeline.getOutput()?.stats.graphConflictReferenceCount).toBeDefined();
+  expect(pipeline.getStageOutput("generate-hypergraph")).toBeUndefined();
+  expect(pipeline.getSolver("route-with-rip-and-replace")).toBeUndefined();
+  expect(pipeline.getSolver("expand-traces")).toBeUndefined();
+});

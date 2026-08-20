@@ -39,6 +39,8 @@ test("rips a chokepoint route and requeues it onto a clear corridor", () => {
     makeNode("b-end", 0, 1),
   ];
   prepared.edges = [];
+  prepared.conflictOffsets = undefined;
+  prepared.compactConflictEdgeIds = undefined;
   prepared.adjacency = Array.from({ length: prepared.nodes.length }, () => []);
   const addEdge = (fromNode: number, toNode: number) => {
     const edgeId = prepared.edges.length;
@@ -143,6 +145,8 @@ test("indexes occupied conflict edges without requiring a shared node", () => {
     makeNode("b-end", 0, 1),
   ];
   prepared.edges = [];
+  prepared.conflictOffsets = undefined;
+  prepared.compactConflictEdgeIds = undefined;
   prepared.adjacency = Array.from({ length: prepared.nodes.length }, () => []);
   const addEdge = (fromNode: number, toNode: number) => {
     const edgeId = prepared.edges.length;
@@ -172,6 +176,12 @@ test("indexes occupied conflict edges without requiring a shared node", () => {
   const crossingEdge = prepared.edges[crossingEdgeId]!;
   if (directEdge.kind !== "trace" || crossingEdge.kind !== "trace") {
     throw new Error("Expected trace edges");
+  }
+  if (
+    !Array.isArray(directEdge.conflictEdgeIds) ||
+    !Array.isArray(crossingEdge.conflictEdgeIds)
+  ) {
+    throw new Error("Expected mutable test conflict lists");
   }
   directEdge.conflictEdgeIds.push(crossingEdgeId);
   crossingEdge.conflictEdgeIds.push(directEdgeId);

@@ -22,6 +22,7 @@
   },
   "scripts": {
     "benchmark": "./benchmark.sh",
+    "perf:ladder": "bun run scripts/perf-ladder.ts",
     "build": "bunx tsc --noEmit",
     "build:site": "cosmos-export",
     "dev": "cosmos",
