@@ -38,14 +38,12 @@ interface RawWireSegment {
   start: WirePoint;
   end: WirePoint;
   splitRatios: number[];
-  traceIndex: number;
 }
 
 interface CopperGraph {
   vertices: Map<CopperVertexId, CopperVertex>;
   edges: Map<CopperEdgeId, CopperEdge>;
   adjacency: Map<CopperVertexId, CopperEdge[]>;
-  edgeKeysByTrace: Array<Set<CopperEdgeId>>;
 }
 
 const EPSILON = 1e-7;
@@ -115,8 +113,21 @@ const getTraceEndpoints = (trace: SimplifiedPcbTrace) => {
   return wires.length === 0 ? [] : [wires[0]!, wires.at(-1)!];
 };
 
-const getTraceEndpointKeys = (trace: SimplifiedPcbTrace) =>
-  getTraceEndpoints(trace).map(vertexKey);
+const getDemandTerminalKeys = ({
+  prepared,
+  solution,
+  traceIndex,
+}: {
+  prepared: PreparedBiscuitRoutingProblem;
+  solution: BiscuitBoardRoutingSolution;
+  traceIndex: number;
+}) => {
+  const demand = prepared.demandById.get(solution.routes[traceIndex]!.routeId)!;
+  return [
+    vertexKey(prepared.nodes[demand.sourceNode]!),
+    vertexKey(prepared.nodes[demand.targetNode]!),
+  ] as const;
+};
 
 const addSplitRatio = (segment: RawWireSegment, ratio: number) => {
   if (ratio < -EPSILON || ratio > 1 + EPSILON) return;
@@ -206,7 +217,6 @@ const buildCopperGraph = (
     vertices: new Map(),
     edges: new Map(),
     adjacency: new Map(),
-    edgeKeysByTrace: traces.map(() => new Set()),
   };
   const segments: RawWireSegment[] = [];
 
@@ -225,7 +235,6 @@ const buildCopperGraph = (
           start: point,
           end: next,
           splitRatios: [0, 1],
-          traceIndex,
         });
       }
       if (point.route_type !== "through_obstacle") continue;
@@ -262,7 +271,6 @@ const buildCopperGraph = (
         kind: "fixed_via",
         prefabViaId: prefabVia.prefabViaId,
       });
-      graph.edgeKeysByTrace[traceIndex]!.add(key);
     }
   }
 
@@ -310,7 +318,6 @@ const buildCopperGraph = (
         cost: Math.hypot(first.x - second.x, first.y - second.y),
         kind: "wire",
       });
-      graph.edgeKeysByTrace[segment.traceIndex]!.add(key);
     }
   }
   finishGraph(graph);
@@ -499,8 +506,8 @@ const pathToTrace = (
     ...original,
     connectsTo: [
       ...new Set([
-        ...(original.connectsTo ?? []).filter(
-          (id) => !prepared.fixedViaById.has(id),
+        ...[demand.sourcePointId, demand.targetPointId].filter(
+          (id): id is string => Boolean(id),
         ),
         ...usedViaIds,
       ]),
@@ -530,8 +537,8 @@ export const pruneRedundantSameNetCopper = (
       indexes.map((index) => solution.traces[index]!),
     );
     if (!graphHasCycle(graph)) continue;
-    const terminalKeys = indexes.flatMap((index) =>
-      getTraceEndpointKeys(solution.traces[index]!),
+    const terminalKeys = indexes.flatMap((traceIndex) =>
+      getDemandTerminalKeys({ prepared, solution, traceIndex }),
     );
     const selectedEdges = selectTerminalTree(graph, terminalKeys);
     const originalNetTraces = indexes.map((index) => traces[index]!);
@@ -541,20 +548,21 @@ export const pruneRedundantSameNetCopper = (
       netTraceIndex < indexes.length;
       netTraceIndex++
     ) {
-      const index = indexes[netTraceIndex]!;
-      const originalUsesPrunedEdge = [
-        ...graph.edgeKeysByTrace[netTraceIndex]!,
-      ].some((edge) => !selectedEdges.has(edge));
-      if (!originalUsesPrunedEdge) continue;
-      const demand = prepared.demandById.get(solution.routes[index]!.routeId)!;
-      const [source, target] = getTraceEndpointKeys(solution.traces[index]!);
-      if (!source || !target) continue;
-      traces[index] = pathToTrace(
+      const traceIndex = indexes[netTraceIndex]!;
+      const demand = prepared.demandById.get(
+        solution.routes[traceIndex]!.routeId,
+      )!;
+      const [source, target] = getDemandTerminalKeys({
+        prepared,
+        solution,
+        traceIndex,
+      });
+      traces[traceIndex] = pathToTrace(
         prepared,
         demand,
-        solution.traces[index]!,
+        solution.traces[traceIndex]!,
         graph,
-        findTreePath(graph, selectedEdges, source!, target!),
+        findTreePath(graph, selectedEdges, source, target),
         source,
       );
     }

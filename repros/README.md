@@ -132,11 +132,12 @@ context on every side.
 - Input: 28 merged connections, 175 obstacles, 2 layers, and 69 routing
   demands
 
-The routing pipeline reports success, but a `source_net_1` top-layer branch
-ends at `(-15.8, 18.5375)`. That endpoint is neither a requested electrical
-terminal nor a junction on another `source_net_1` trace, leaving visible copper
-that connects to nothing. The regression test verifies that exact dangling
-endpoint and snapshots the prefabricated-via area shown in the original report.
+The captured input previously produced a `source_net_1` top-layer branch ending
+at `(-15.8, 18.5375)`. That endpoint was neither a requested electrical terminal
+nor a junction on another `source_net_1` trace, leaving visible copper that
+connected to nothing. The regression test verifies that the reported point is
+no longer a dangling endpoint and snapshots the prefabricated-via area shown in
+the original report.
 
 ## Headless benchmark suite
 

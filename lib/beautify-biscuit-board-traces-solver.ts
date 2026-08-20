@@ -18,6 +18,7 @@ import type {
   BiscuitBoardRoutingSolution,
   Point,
   PreparedBiscuitRoutingProblem,
+  RoutingNode,
 } from "./types";
 
 type RoutePoint = SimplifiedPcbTrace["route"][number];
@@ -34,7 +35,7 @@ const cloneTraces = (traces: SimplifiedPcbTrace[]) =>
     route: trace.route.map((point) => ({ ...point })),
   }));
 
-const pointKey = (point: WirePoint) =>
+const pointKey = (point: WirePoint | RoutingNode) =>
   `${point.layer}:${point.x.toFixed(6)}:${point.y.toFixed(6)}`;
 
 const sameWirePoint = (first: RoutePoint, second: RoutePoint) =>
@@ -89,7 +90,16 @@ const getIndexedWireSegments = (trace: SimplifiedPcbTrace) => {
   return segments;
 };
 
-const getProtectedJunctionKeys = (traces: SimplifiedPcbTrace[]) => {
+const getProtectedJunctionKeys = (
+  prepared: PreparedBiscuitRoutingProblem,
+  traces: SimplifiedPcbTrace[],
+) => {
+  const protectedKeys = new Set(
+    prepared.demands.flatMap((demand) => [
+      pointKey(prepared.nodes[demand.sourceNode]!),
+      pointKey(prepared.nodes[demand.targetNode]!),
+    ]),
+  );
   const traceIndexesByPoint = new Map<string, Set<number>>();
   for (const [traceIndex, trace] of traces.entries()) {
     for (const point of trace.route) {
@@ -99,11 +109,10 @@ const getProtectedJunctionKeys = (traces: SimplifiedPcbTrace[]) => {
       traceIndexesByPoint.set(pointKey(point), indexes);
     }
   }
-  return new Set(
-    [...traceIndexesByPoint.entries()]
-      .filter(([, traceIndexes]) => traceIndexes.size > 1)
-      .map(([key]) => key),
-  );
+  for (const [key, traceIndexes] of traceIndexesByPoint) {
+    if (traceIndexes.size > 1) protectedKeys.add(key);
+  }
+  return protectedKeys;
 };
 
 const routeGeometryEqual = (
@@ -389,7 +398,7 @@ const consolidateSameNetTraces = (
   clearance: number,
 ) => {
   const traces = cloneTraces(solution.traces);
-  const protectedJunctionKeys = getProtectedJunctionKeys(traces);
+  const protectedJunctionKeys = getProtectedJunctionKeys(prepared, traces);
   let consolidationCount = 0;
 
   for (let pass = 0; pass < traces.length; pass++) {
@@ -633,7 +642,7 @@ const chamferTraceCorners = (
   clearance: number,
 ) => {
   const traces = cloneTraces(solution.traces);
-  const protectedJunctionKeys = getProtectedJunctionKeys(traces);
+  const protectedJunctionKeys = getProtectedJunctionKeys(prepared, traces);
   let chamferCount = 0;
 
   for (let traceIndex = 0; traceIndex < traces.length; traceIndex++) {

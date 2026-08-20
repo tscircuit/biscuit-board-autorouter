@@ -67,7 +67,7 @@ const cropSvgToIssue = (svg: string) => {
     );
 };
 
-test("reproduces the stray top-layer branch in the stepper circuit", async () => {
+test("removes the stray top-layer branch in the stepper circuit", async () => {
   expect(input.connections).toHaveLength(28);
   expect(input.obstacles).toHaveLength(175);
 
@@ -86,7 +86,7 @@ test("reproduces the stray top-layer branch in the stepper circuit", async () =>
   const output = solver.getOutput()!;
   expect(output.traces).toHaveLength(69);
 
-  const danglingTrace = output.traces.find((trace) => {
+  const traceEndingAtReportedPoint = output.traces.find((trace) => {
     const points = wirePoints(trace);
     return (
       trace.connection_name === "source_net_1" &&
@@ -94,7 +94,6 @@ test("reproduces the stray top-layer branch in the stepper circuit", async () =>
       isSamePoint(points.at(-1)!, DANGLING_ENDPOINT)
     );
   });
-  expect(danglingTrace).toBeDefined();
 
   const requestedTerminals = input.connections.find(
     (connection) => connection.name === "source_net_1",
@@ -110,20 +109,20 @@ test("reproduces the stray top-layer branch in the stepper circuit", async () =>
   const sameNetJunctionExists = output.traces
     .filter(
       (trace) =>
-        trace !== danglingTrace && trace.connection_name === "source_net_1",
+        trace !== traceEndingAtReportedPoint &&
+        trace.connection_name === "source_net_1",
     )
     .some((trace) => {
       const points = wirePoints(trace);
-      return points.slice(1).some((end, index) => {
-        const start = points[index]!;
-        return (
-          start.layer === DANGLING_ENDPOINT.layer &&
-          end.layer === DANGLING_ENDPOINT.layer &&
-          pointIsOnSegment(DANGLING_ENDPOINT, start, end)
+      return points
+        .slice(1)
+        .some((end, index) =>
+          pointIsOnSegment(DANGLING_ENDPOINT, points[index]!, end),
         );
-      });
     });
-  expect(sameNetJunctionExists).toBe(false);
+  expect(
+    traceEndingAtReportedPoint !== undefined && !sameNetJunctionExists,
+  ).toBe(false);
 
   const graphics = solver.visualize();
   const fullSvg = getSvgFromGraphicsObject(
@@ -145,7 +144,7 @@ test("reproduces the stray top-layer branch in the stepper circuit", async () =>
         {
           x: DANGLING_ENDPOINT.x,
           y: DANGLING_ENDPOINT.y + 0.8,
-          text: "dangling endpoint",
+          text: "former dangling endpoint",
           fontSize: 0.42,
         },
       ],
