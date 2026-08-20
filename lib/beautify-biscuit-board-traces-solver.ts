@@ -18,6 +18,7 @@ import type {
   BiscuitBoardRoutingSolution,
   Point,
   PreparedBiscuitRoutingProblem,
+  RoutingNode,
 } from "./types";
 
 type RoutePoint = SimplifiedPcbTrace["route"][number];
@@ -34,7 +35,7 @@ const cloneTraces = (traces: SimplifiedPcbTrace[]) =>
     route: trace.route.map((point) => ({ ...point })),
   }));
 
-const pointKey = (point: { x: number; y: number; layer: string }) =>
+const pointKey = (point: WirePoint | RoutingNode) =>
   `${point.layer}:${point.x.toFixed(6)}:${point.y.toFixed(6)}`;
 
 const sameWirePoint = (first: RoutePoint, second: RoutePoint) =>
