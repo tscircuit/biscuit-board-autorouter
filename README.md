@@ -71,9 +71,12 @@ bun run perf:ladder
 
 `perf:ladder` runs six isolated cases from a tiny route through the RP2040
 stress board. It reports wall time, process CPU time, stage timings, peak heap
-and RSS, search high-water marks, graph density, route count, manufactured-via
-count, and final clearance violations. Use `--case=stm32 --runs=3` to isolate a
-rung or `--max-ms=90000` to give the stress case a longer budget.
+and RSS, external and ArrayBuffer memory, cache hit rates, graph subphase work,
+route count, manufactured-via count, and final clearance violations. Use
+`--case=stm32 --runs=3` to isolate a rung or `--max-ms=90000` to give the stress
+case a longer budget. `--low-memory` measures result-only stage retention.
+`--compare=/path/to/previous/lib/index.ts` alternates previous and current
+workers on every repetition to reduce host-load drift in A/B measurements.
 
 Direct `BiscuitBoardRoutingPipelineSolver` instances retain completed stages
 for debugger visualization by default. Set `retainIntermediateStages: false`

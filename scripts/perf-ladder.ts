@@ -37,8 +37,12 @@ interface WorkerResult {
   peakHeapUsedBytes: number;
   rssBeforeBytes: number;
   peakRssBytes: number;
+  peakExternalBytes: number;
+  peakArrayBuffersBytes: number;
   peakHeapGrowthBytes: number;
   peakRssGrowthBytes: number;
+  retainedStageOutputCount: number;
+  lowMemoryMode: boolean;
   connectionCount: number;
   obstacleCount: number;
   expectedTraceCount: number | null;
@@ -155,6 +159,7 @@ const runWorker = async (
   ladderCase: LadderCase,
   maximumRuntimeMs: number,
   implementationPath: string | undefined,
+  lowMemoryMode: boolean,
 ) => {
   const implementation = (
     implementationPath
@@ -165,11 +170,16 @@ const runWorker = async (
     implementation;
   const solver = new BiscuitBoardRoutingPipelineSolver(
     ladderCase.input,
-    ladderCase.options,
+    lowMemoryMode
+      ? { ...ladderCase.options, retainIntermediateStages: false }
+      : ladderCase.options,
   );
   const initialMemory = process.memoryUsage();
   let peakHeapUsedBytes = initialMemory.heapUsed;
   let peakRssBytes = initialMemory.rss;
+  let peakExternalBytes = initialMemory.external;
+  let peakArrayBuffersBytes = initialMemory.arrayBuffers;
+  let prepared: PreparedBiscuitRoutingProblem | null = null;
   let nextMemorySampleAt = 0;
   const stageDurationsMs = new Map<string, number>();
   const startedAt = performance.now();
@@ -185,6 +195,9 @@ const runWorker = async (
       const stage = solver.stage;
       const stepStartedAt = performance.now();
       solver.step();
+      prepared ??= solver.getStageOutput<PreparedBiscuitRoutingProblem>(
+        "generate-hypergraph",
+      );
       const now = performance.now();
       stageDurationsMs.set(
         stage,
@@ -194,6 +207,11 @@ const runWorker = async (
         const memory = process.memoryUsage();
         peakHeapUsedBytes = Math.max(peakHeapUsedBytes, memory.heapUsed);
         peakRssBytes = Math.max(peakRssBytes, memory.rss);
+        peakExternalBytes = Math.max(peakExternalBytes, memory.external);
+        peakArrayBuffersBytes = Math.max(
+          peakArrayBuffersBytes,
+          memory.arrayBuffers,
+        );
         nextMemorySampleAt = now + 50;
       }
     }
@@ -207,13 +225,18 @@ const runWorker = async (
   const finalMemory = process.memoryUsage();
   peakHeapUsedBytes = Math.max(peakHeapUsedBytes, finalMemory.heapUsed);
   peakRssBytes = Math.max(peakRssBytes, finalMemory.rss);
+  peakExternalBytes = Math.max(peakExternalBytes, finalMemory.external);
+  peakArrayBuffersBytes = Math.max(
+    peakArrayBuffersBytes,
+    finalMemory.arrayBuffers,
+  );
   const timedOut =
     !solver.solved &&
     !solver.failed &&
     thrownError === null &&
     elapsedMs >= maximumRuntimeMs;
   const output = solver.getOutput();
-  const prepared = solver.getStageOutput<PreparedBiscuitRoutingProblem>(
+  prepared ??= solver.getStageOutput<PreparedBiscuitRoutingProblem>(
     "generate-hypergraph",
   );
   const routeStats = solver.getSolver("route-with-rip-and-replace")?.stats as
@@ -264,11 +287,18 @@ const runWorker = async (
     peakHeapUsedBytes,
     rssBeforeBytes: initialMemory.rss,
     peakRssBytes,
+    peakExternalBytes,
+    peakArrayBuffersBytes,
     peakHeapGrowthBytes: Math.max(
       0,
       peakHeapUsedBytes - initialMemory.heapUsed,
     ),
     peakRssGrowthBytes: Math.max(0, peakRssBytes - initialMemory.rss),
+    retainedStageOutputCount: Object.keys(
+      (solver as unknown as { pipelineOutputs: Record<string, unknown> })
+        .pipelineOutputs,
+    ).length,
+    lowMemoryMode,
     connectionCount: ladderCase.input.connections.length,
     obstacleCount: ladderCase.input.obstacles.length,
     expectedTraceCount,
@@ -317,13 +347,88 @@ const percentile = (values: number[], percentileValue: number) => {
   return sorted[Math.ceil((sorted.length - 1) * percentileValue)]!;
 };
 
+const executeWorker = (
+  ladderCase: LadderCase,
+  maximumRuntimeMs: number,
+  implementationPath: string | undefined,
+  lowMemoryMode: boolean,
+) => {
+  const child = Bun.spawnSync({
+    cmd: [
+      process.execPath,
+      import.meta.path,
+      `--worker=${ladderCase.id}`,
+      `--max-ms=${maximumRuntimeMs}`,
+      ...(implementationPath ? [`--implementation=${implementationPath}`] : []),
+      ...(lowMemoryMode ? ["--low-memory"] : []),
+    ],
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  if (child.exitCode !== 0) {
+    throw new Error(
+      `Ladder worker ${ladderCase.id} failed: ${child.stderr.toString()}`,
+    );
+  }
+  return JSON.parse(child.stdout.toString()) as WorkerResult;
+};
+
+const summarizeRuns = (runs: WorkerResult[]) => ({
+  runCount: runs.length,
+  passed: runs.every(({ passed }) => passed),
+  averageElapsedMs: roundedMean(runs.map(({ elapsedMs }) => elapsedMs)),
+  elapsedStandardDeviationMs: Math.round(
+    standardDeviation(runs.map(({ elapsedMs }) => elapsedMs)),
+  ),
+  medianElapsedMs: Math.round(median(runs.map(({ elapsedMs }) => elapsedMs))),
+  medianCpuTimeMs: Math.round(median(runs.map(({ cpuTimeMs }) => cpuTimeMs))),
+  averageCpuTimeMs: roundedMean(runs.map(({ cpuTimeMs }) => cpuTimeMs)),
+  p95ElapsedMs: Math.round(
+    percentile(
+      runs.map(({ elapsedMs }) => elapsedMs),
+      0.95,
+    ),
+  ),
+  peakHeapUsedBytes: Math.max(
+    ...runs.map(({ peakHeapUsedBytes }) => peakHeapUsedBytes),
+  ),
+  peakRssBytes: Math.max(...runs.map(({ peakRssBytes }) => peakRssBytes)),
+  averagePeakHeapUsedBytes: roundedMean(
+    runs.map(({ peakHeapUsedBytes }) => peakHeapUsedBytes),
+  ),
+  averagePeakRssBytes: roundedMean(
+    runs.map(({ peakRssBytes }) => peakRssBytes),
+  ),
+  averagePeakExternalBytes: roundedMean(
+    runs.map(({ peakExternalBytes }) => peakExternalBytes),
+  ),
+  averagePeakArrayBuffersBytes: roundedMean(
+    runs.map(({ peakArrayBuffersBytes }) => peakArrayBuffersBytes),
+  ),
+  averagePeakHeapGrowthBytes: roundedMean(
+    runs.map(({ peakHeapGrowthBytes }) => peakHeapGrowthBytes),
+  ),
+  averagePeakRssGrowthBytes: roundedMean(
+    runs.map(({ peakRssGrowthBytes }) => peakRssGrowthBytes),
+  ),
+  averageStageDurationsMs: averageStageDurations(runs),
+  runs,
+});
+
 const workerCaseId = getArgument("--worker");
 const maximumRuntimeMs = getPositiveNumberArgument("--max-ms", 30_000);
 const implementationPath = getArgument("--implementation");
+const comparisonImplementationPath = getArgument("--compare");
+const lowMemoryMode = process.argv.includes("--low-memory");
 if (workerCaseId) {
   const ladderCase = ladderCases.find(({ id }) => id === workerCaseId);
   if (!ladderCase) throw new Error(`Unknown ladder case: ${workerCaseId}`);
-  await runWorker(ladderCase, maximumRuntimeMs, implementationPath);
+  await runWorker(
+    ladderCase,
+    maximumRuntimeMs,
+    implementationPath,
+    lowMemoryMode,
+  );
 } else {
   const requestedCaseIds = process.argv
     .filter((argument) => argument.startsWith("--case="))
@@ -339,69 +444,52 @@ if (workerCaseId) {
   }
   const runCount = getPositiveNumberArgument("--runs", 1);
   const results = selectedCases.map((ladderCase) => {
-    const runs: WorkerResult[] = [];
-    for (let runIndex = 0; runIndex < runCount; runIndex++) {
-      const child = Bun.spawnSync({
-        cmd: [
-          process.execPath,
-          import.meta.path,
-          `--worker=${ladderCase.id}`,
-          `--max-ms=${maximumRuntimeMs}`,
-          ...(implementationPath
-            ? [`--implementation=${implementationPath}`]
-            : []),
-        ],
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      if (child.exitCode !== 0) {
-        throw new Error(
-          `Ladder worker ${ladderCase.id} failed: ${child.stderr.toString()}`,
-        );
-      }
-      runs.push(JSON.parse(child.stdout.toString()) as WorkerResult);
+    if (!comparisonImplementationPath) {
+      return {
+        level: ladderCase.level,
+        id: ladderCase.id,
+        name: ladderCase.name,
+        ...summarizeRuns(
+          Array.from({ length: runCount }, () =>
+            executeWorker(
+              ladderCase,
+              maximumRuntimeMs,
+              implementationPath,
+              lowMemoryMode,
+            ),
+          ),
+        ),
+      };
     }
+    const previousRuns: WorkerResult[] = [];
+    const currentRuns: WorkerResult[] = [];
+    for (let runIndex = 0; runIndex < runCount; runIndex++) {
+      const order =
+        runIndex % 2 === 0
+          ? (["previous", "current"] as const)
+          : (["current", "previous"] as const);
+      for (const version of order) {
+        const result = executeWorker(
+          ladderCase,
+          maximumRuntimeMs,
+          version === "previous"
+            ? comparisonImplementationPath
+            : implementationPath,
+          lowMemoryMode,
+        );
+        (version === "previous" ? previousRuns : currentRuns).push(result);
+      }
+    }
+    const previous = summarizeRuns(previousRuns);
+    const current = summarizeRuns(currentRuns);
     return {
       level: ladderCase.level,
       id: ladderCase.id,
       name: ladderCase.name,
       runCount,
-      passed: runs.every(({ passed }) => passed),
-      averageElapsedMs: roundedMean(runs.map(({ elapsedMs }) => elapsedMs)),
-      elapsedStandardDeviationMs: Math.round(
-        standardDeviation(runs.map(({ elapsedMs }) => elapsedMs)),
-      ),
-      medianElapsedMs: Math.round(
-        median(runs.map(({ elapsedMs }) => elapsedMs)),
-      ),
-      medianCpuTimeMs: Math.round(
-        median(runs.map(({ cpuTimeMs }) => cpuTimeMs)),
-      ),
-      averageCpuTimeMs: roundedMean(runs.map(({ cpuTimeMs }) => cpuTimeMs)),
-      p95ElapsedMs: Math.round(
-        percentile(
-          runs.map(({ elapsedMs }) => elapsedMs),
-          0.95,
-        ),
-      ),
-      peakHeapUsedBytes: Math.max(
-        ...runs.map(({ peakHeapUsedBytes }) => peakHeapUsedBytes),
-      ),
-      peakRssBytes: Math.max(...runs.map(({ peakRssBytes }) => peakRssBytes)),
-      averagePeakHeapUsedBytes: roundedMean(
-        runs.map(({ peakHeapUsedBytes }) => peakHeapUsedBytes),
-      ),
-      averagePeakRssBytes: roundedMean(
-        runs.map(({ peakRssBytes }) => peakRssBytes),
-      ),
-      averagePeakHeapGrowthBytes: roundedMean(
-        runs.map(({ peakHeapGrowthBytes }) => peakHeapGrowthBytes),
-      ),
-      averagePeakRssGrowthBytes: roundedMean(
-        runs.map(({ peakRssGrowthBytes }) => peakRssGrowthBytes),
-      ),
-      averageStageDurationsMs: averageStageDurations(runs),
-      runs,
+      passed: previous.passed && current.passed,
+      previous,
+      current,
     };
   });
   console.log(

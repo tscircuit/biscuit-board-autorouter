@@ -415,7 +415,9 @@ const buildDemands = (
 };
 
 class ConflictPairList {
-  private static readonly CHUNK_SIZE = 1 << 20;
+  private static readonly CHUNK_SHIFT = 20;
+  private static readonly CHUNK_SIZE = 1 << ConflictPairList.CHUNK_SHIFT;
+  private static readonly CHUNK_MASK = ConflictPairList.CHUNK_SIZE - 1;
   private readonly chunks: Uint32Array[] = [
     new Uint32Array(ConflictPairList.CHUNK_SIZE),
   ];
@@ -433,28 +435,37 @@ class ConflictPairList {
   }
 
   private setNext(value: number) {
-    const chunkIndex = Math.floor(
-      this.valueCount / ConflictPairList.CHUNK_SIZE,
-    );
+    const chunkIndex = this.valueCount >>> ConflictPairList.CHUNK_SHIFT;
     if (!this.chunks[chunkIndex]) {
       this.chunks.push(new Uint32Array(ConflictPairList.CHUNK_SIZE));
     }
-    this.chunks[chunkIndex]![this.valueCount % ConflictPairList.CHUNK_SIZE] =
+    this.chunks[chunkIndex]![this.valueCount & ConflictPairList.CHUNK_MASK] =
       value;
     this.valueCount++;
   }
 
   private get(index: number) {
-    return this.chunks[Math.floor(index / ConflictPairList.CHUNK_SIZE)]![
-      index % ConflictPairList.CHUNK_SIZE
+    return this.chunks[index >>> ConflictPairList.CHUNK_SHIFT]![
+      index & ConflictPairList.CHUNK_MASK
     ]!;
   }
+}
+
+interface HypergraphBuildTimings {
+  structureMs: number;
+  conflictCollectionMs: number;
+  conflictCompactionMs: number;
+  conflictCandidateCount: number;
+  conflictDistanceCheckCount: number;
+  finalizationMs: number;
+  buildCount: number;
 }
 
 const collectConflictPairs = (
   edges: RoutingEdge[],
   nodes: RoutingNode[],
   minimumTraceCenterDistance: number,
+  timings?: HypergraphBuildTimings,
 ) => {
   const conflictPairs = new ConflictPairList();
   const traceEdges = edges.filter(
@@ -502,10 +513,29 @@ const collectConflictPairs = (
     const maxBucketX = Math.floor(edgeMaxX / bucketSize);
     const minBucketY = Math.floor(edgeMinY / bucketSize);
     const maxBucketY = Math.floor(edgeMaxY / bucketSize);
+    // Query with the clearance-expanded bounds, but index the segment only by
+    // its actual bounds. Expanding both sides doubles the search radius and
+    // floods dense buckets with candidates that the exact distance check will
+    // always reject.
+    const boundsOffset = edge.edgeId * 4;
+    const insertMinBucketX = Math.floor(
+      boundsByEdgeId[boundsOffset]! / bucketSize,
+    );
+    const insertMaxBucketX = Math.floor(
+      boundsByEdgeId[boundsOffset + 1]! / bucketSize,
+    );
+    const insertMinBucketY = Math.floor(
+      boundsByEdgeId[boundsOffset + 2]! / bucketSize,
+    );
+    const insertMaxBucketY = Math.floor(
+      boundsByEdgeId[boundsOffset + 3]! / bucketSize,
+    );
     for (let x = minBucketX; x <= maxBucketX; x++) {
       for (let y = minBucketY; y <= maxBucketY; y++) {
-        for (const candidateId of buckets.get(getBucketKey(from.layer, x, y)) ??
-          []) {
+        const bucket = buckets.get(getBucketKey(from.layer, x, y));
+        if (!bucket) continue;
+        for (const candidateId of bucket) {
+          if (timings) timings.conflictCandidateCount++;
           if (lastSeenByEdgeId[candidateId] === edge.edgeId) continue;
           lastSeenByEdgeId[candidateId] = edge.edgeId;
           const candidateOffset = candidateId * 4;
@@ -523,6 +553,7 @@ const collectConflictPairs = (
           >;
           const candidateFrom = nodes[candidate.fromNode]!;
           const candidateTo = nodes[candidate.toNode]!;
+          if (timings) timings.conflictDistanceCheckCount++;
           if (
             from.layer === candidateFrom.layer &&
             segmentDistance(from, to, candidateFrom, candidateTo) <
@@ -533,12 +564,12 @@ const collectConflictPairs = (
         }
       }
     }
-    for (let x = minBucketX; x <= maxBucketX; x++) {
-      for (let y = minBucketY; y <= maxBucketY; y++) {
+    for (let x = insertMinBucketX; x <= insertMaxBucketX; x++) {
+      for (let y = insertMinBucketY; y <= insertMaxBucketY; y++) {
         const key = getBucketKey(from.layer, x, y);
-        const values = buckets.get(key) ?? [];
-        values.push(edge.edgeId);
-        buckets.set(key, values);
+        const values = buckets.get(key);
+        if (values) values.push(edge.edgeId);
+        else buckets.set(key, [edge.edgeId]);
       }
     }
   }
@@ -574,7 +605,9 @@ const buildBiscuitBoardHypergraph = (
   input: SimpleRouteJson,
   rawOptions: BiscuitBoardAutorouterOptions = {},
   exactRotatedObstacleIndexes: ReadonlySet<number> = new Set(),
+  timings?: HypergraphBuildTimings,
 ): PreparedBiscuitRoutingProblem => {
+  const buildStartedAt = performance.now();
   if (input.layerCount < 1) throw new Error("layerCount must be at least one");
   if (
     input.bounds.maxX <= input.bounds.minX ||
@@ -1142,17 +1175,31 @@ const buildBiscuitBoardHypergraph = (
     }
   }
 
+  const conflictCollectionStartedAt = performance.now();
+  if (timings)
+    timings.structureMs += conflictCollectionStartedAt - buildStartedAt;
   const conflictPairs = collectConflictPairs(
     edges,
     nodes,
     maximumTraceWidth + effectiveClearance,
+    timings,
   );
+  const conflictCompactionStartedAt = performance.now();
+  if (timings) {
+    timings.conflictCollectionMs +=
+      conflictCompactionStartedAt - conflictCollectionStartedAt;
+  }
   const { conflictOffsets, compactConflictEdgeIds } = compactConflictPairs(
     edges,
     conflictPairs,
   );
+  const finalizationStartedAt = performance.now();
+  if (timings) {
+    timings.conflictCompactionMs +=
+      finalizationStartedAt - conflictCompactionStartedAt;
+  }
   const demands = buildDemands(input, nodeIndexByKey);
-  return {
+  const result = {
     input,
     options: normalizedOptions,
     exactRotatedObstacleIndexes: [...exactRotatedObstacleIndexes],
@@ -1169,6 +1216,11 @@ const buildBiscuitBoardHypergraph = (
       prefabricatedVias.map((via) => [via.prefabViaId, via]),
     ),
   };
+  if (timings) {
+    timings.finalizationMs += performance.now() - finalizationStartedAt;
+    timings.buildCount++;
+  }
+  return result;
 };
 
 export const generateBiscuitBoardHypergraph = (
@@ -1198,9 +1250,20 @@ export class GenerateBiscuitBoardHypergraphSolver extends BaseSolver {
   }
 
   override _step() {
-    const nominalProblem = generateBiscuitBoardHypergraph(
+    const buildTimings: HypergraphBuildTimings = {
+      structureMs: 0,
+      conflictCollectionMs: 0,
+      conflictCompactionMs: 0,
+      conflictCandidateCount: 0,
+      conflictDistanceCheckCount: 0,
+      finalizationMs: 0,
+      buildCount: 0,
+    };
+    const nominalProblem = buildBiscuitBoardHypergraph(
       this.input,
       this.options,
+      new Set(),
+      buildTimings,
     );
     const rotatedObstacleIndexes = this.input.obstacles.flatMap(
       (obstacle, obstacleIndex) =>
@@ -1210,6 +1273,7 @@ export class GenerateBiscuitBoardHypergraphSolver extends BaseSolver {
           : [],
     );
     let detectedRotatedObstacleIndexes: number[] = [];
+    const rotatedObstacleProbeStartedAt = performance.now();
     if (
       rotatedObstacleIndexes.length > 0 &&
       !nominalProblem.options.respectObstacleRotationInGraph
@@ -1252,6 +1316,7 @@ export class GenerateBiscuitBoardHypergraphSolver extends BaseSolver {
             this.input,
             this.options,
             new Set(detectedRotatedObstacleIndexes),
+            buildTimings,
           )
         : nominalProblem;
     this.stats = {
@@ -1278,6 +1343,20 @@ export class GenerateBiscuitBoardHypergraphSolver extends BaseSolver {
           (edge.kind === "trace" ? edge.blockingObstacleIndexes.length : 0),
         0,
       ),
+      graphStructureBuildDurationMs: Math.round(buildTimings.structureMs),
+      graphConflictCollectionDurationMs: Math.round(
+        buildTimings.conflictCollectionMs,
+      ),
+      graphConflictCompactionDurationMs: Math.round(
+        buildTimings.conflictCompactionMs,
+      ),
+      graphConflictCandidateCount: buildTimings.conflictCandidateCount,
+      graphConflictDistanceCheckCount: buildTimings.conflictDistanceCheckCount,
+      graphFinalizationDurationMs: Math.round(buildTimings.finalizationMs),
+      graphRotatedObstacleProbeDurationMs: Math.round(
+        performance.now() - rotatedObstacleProbeStartedAt,
+      ),
+      graphBuildCount: buildTimings.buildCount,
       prefabricatedViaCount: this.output.prefabricatedVias.length,
       automaticallyReservedRotatedObstacleCount:
         detectedRotatedObstacleIndexes.length,
