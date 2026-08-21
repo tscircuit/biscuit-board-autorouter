@@ -329,13 +329,17 @@ const createParallelConsolidationCandidate = (
   const offset = Math.abs(
     cross(direction, subtract(segment.start, anchor.start)),
   );
-  // Two clearance-safe 45-degree approaches consume one offset at either end.
+  // Avoid a disproportionate detour when the shared run is short relative to
+  // the distance between the parallel centerlines.
   if (offset <= EPSILON || overlapLength <= 2 * offset + EPSILON) {
+    return null;
+  }
+  const combinedHalfWidth = (segment.start.width + anchor.start.width) / 2;
+  if (offset <= combinedHalfWidth + EPSILON) {
     return null;
   }
 
   const followsAnchorDirection = segmentEndProjection > segmentStartProjection;
-  const travelDirection = followsAnchorDirection ? 1 : -1;
   const entryProjection = followsAnchorDirection ? overlapStart : overlapEnd;
   const exitProjection = followsAnchorDirection ? overlapEnd : overlapStart;
   const pointOnAnchor = (projection: number): Point => ({
@@ -348,17 +352,8 @@ const createParallelConsolidationCandidate = (
   });
   const candidateEntry = pointOnSegment(entryProjection);
   const candidateExit = pointOnSegment(exitProjection);
-  const copperAlreadyOverlaps =
-    offset <= (segment.start.width + anchor.start.width) / 2 + EPSILON;
-  // Only nudge nearly coincident centerlines. Applying this shift to separated
-  // lanes reroutes otherwise straight branches merely to make the approach 45°.
-  const approachProjectionOffset = copperAlreadyOverlaps ? offset : 0;
-  const anchorEntry = pointOnAnchor(
-    entryProjection + travelDirection * approachProjectionOffset,
-  );
-  const anchorExit = pointOnAnchor(
-    exitProjection - travelDirection * approachProjectionOffset,
-  );
+  const anchorEntry = pointOnAnchor(entryProjection);
+  const anchorExit = pointOnAnchor(exitProjection);
   const corridor = [candidateEntry, candidateExit, anchorExit, anchorEntry];
   if (
     !parallelCorridorIsEmpty(
@@ -393,7 +388,7 @@ const createParallelConsolidationCandidate = (
   return {
     route: candidateRoute,
     overlapLength,
-    lengthReduction: segmentLength - wirePathLength(replacement),
+    lengthReduction: -2 * offset,
   };
 };
 

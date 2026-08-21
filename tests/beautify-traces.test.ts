@@ -325,7 +325,7 @@ test("beautification combines unobstructed parallel same-net spans", () => {
   }
 });
 
-test("overlapping parallel same-net copper uses 45-degree approaches", () => {
+test("beautification leaves already-overlapping parallel same-net copper unchanged", () => {
   const input: SimpleRouteJson = {
     bounds: { minX: 0, minY: 0, maxX: 10, maxY: 8 },
     layerCount: 1,
@@ -362,25 +362,9 @@ test("overlapping parallel same-net copper uses 45-degree approaches", () => {
   ]);
 
   const beautified = beautifyBiscuitBoardTraces(prepared, solution);
-  const approachSegments = beautified.traces[0]!.route.slice(1).flatMap(
-    (end, index) => {
-      const start = beautified.traces[0]!.route[index]!;
-      if (
-        start.route_type !== "wire" ||
-        end.route_type !== "wire" ||
-        Math.abs(start.y - end.y) <= 1e-7
-      ) {
-        return [];
-      }
-      return [{ start, end }];
-    },
-  );
 
-  expect(beautified.stats.sameNetConsolidationCount).toBeGreaterThan(0);
-  expect(approachSegments.length).toBeGreaterThan(0);
-  for (const { start, end } of approachSegments) {
-    expect(Math.abs(end.x - start.x)).toBeCloseTo(Math.abs(end.y - start.y), 7);
-  }
+  expect(beautified.traces).toEqual(solution.traces);
+  expect(beautified.stats.sameNetConsolidationCount).toBe(0);
 });
 
 for (const [blocker, blockerLabel] of [
