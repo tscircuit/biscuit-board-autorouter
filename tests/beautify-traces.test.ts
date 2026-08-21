@@ -325,6 +325,48 @@ test("beautification combines unobstructed parallel same-net spans", () => {
   }
 });
 
+test("beautification leaves already-overlapping parallel same-net copper unchanged", () => {
+  const input: SimpleRouteJson = {
+    bounds: { minX: 0, minY: 0, maxX: 10, maxY: 8 },
+    layerCount: 1,
+    minTraceWidth: 0.1,
+    obstacles: [],
+    connections: [
+      {
+        name: "anchor-ground",
+        netConnectionName: "GND",
+        pointsToConnect: [
+          { x: 2, y: 3, layer: "top", pointId: "anchor-left" },
+          { x: 8, y: 3, layer: "top", pointId: "anchor-right" },
+        ],
+      },
+      {
+        name: "offset-ground",
+        netConnectionName: "GND",
+        pointsToConnect: [
+          { x: 2, y: 3.05, layer: "top", pointId: "offset-left" },
+          { x: 8, y: 3.05, layer: "top", pointId: "offset-right" },
+        ],
+      },
+    ],
+  };
+  const { prepared, solution } = createSolution(input, [
+    [
+      { x: 2, y: 3 },
+      { x: 8, y: 3 },
+    ],
+    [
+      { x: 2, y: 3.05 },
+      { x: 8, y: 3.05 },
+    ],
+  ]);
+
+  const beautified = beautifyBiscuitBoardTraces(prepared, solution);
+
+  expect(beautified.traces).toEqual(solution.traces);
+  expect(beautified.stats.sameNetConsolidationCount).toBe(0);
+});
+
 for (const [blocker, blockerLabel] of [
   ["obstacle", "an obstacle"],
   ["foreign-trace", "a foreign trace"],

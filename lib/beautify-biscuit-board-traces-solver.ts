@@ -329,8 +329,13 @@ const createParallelConsolidationCandidate = (
   const offset = Math.abs(
     cross(direction, subtract(segment.start, anchor.start)),
   );
-  // Two clearance-safe 45-degree approaches consume one offset at either end.
+  // Avoid a disproportionate detour when the shared run is short relative to
+  // the distance between the parallel centerlines.
   if (offset <= EPSILON || overlapLength <= 2 * offset + EPSILON) {
+    return null;
+  }
+  const combinedHalfWidth = (segment.start.width + anchor.start.width) / 2;
+  if (offset <= combinedHalfWidth + EPSILON) {
     return null;
   }
 
