@@ -1,5 +1,11 @@
+import type { SimpleRouteJson } from "@tscircuit/core";
 import { BaseSolver } from "@tscircuit/solver-utils";
 import type { GraphicsObject } from "graphics-debug";
+import { BuildBiscuitBoardTracesSolver } from "./build-biscuit-board-traces-solver";
+import {
+  type ConflictPairCollection,
+  collectRoutingEdgeConflicts,
+} from "./conflict-pair-collector";
 import {
   EXPANSION_CLEARANCE_GUARD,
   getTerminalEscapeMinimumRun,
@@ -12,6 +18,8 @@ import {
   visualizePreparedProblem,
   visualizeSimpleRouteJsonInput,
 } from "./geometry";
+import { getTraceClearanceViolations } from "./post-process-biscuit-board-traces-solver";
+import { RipUpRubberBandSolver } from "./rip-up-rubber-band-solver";
 import type {
   BiscuitBoardAutorouterOptions,
   NormalizedBiscuitBoardAutorouterOptions,
@@ -23,14 +31,6 @@ import type {
   RoutingEdge,
   RoutingNode,
 } from "./types";
-import type { SimpleRouteJson } from "@tscircuit/core";
-import { BuildBiscuitBoardTracesSolver } from "./build-biscuit-board-traces-solver";
-import { getTraceClearanceViolations } from "./post-process-biscuit-board-traces-solver";
-import { RipUpRubberBandSolver } from "./rip-up-rubber-band-solver";
-import {
-  collectRoutingEdgeConflicts,
-  type ConflictPairCollection,
-} from "./conflict-pair-collector";
 
 const ROUNDING_SCALE = 1e6;
 const roundCoordinate = (value: number) =>
@@ -57,6 +57,11 @@ const DEFAULT_OPTIONS: NormalizedBiscuitBoardAutorouterOptions = {
   expansionsPerStep: 3_000,
   heuristicWeight: 1.25,
   maxHeuristicWeight: 1.5,
+  beamWidth: 0,
+  approximateSearchMinDemandCount: 20,
+  approximateSearchMaxDemandCount: 63,
+  approximateSearchMaxGraphNodeCount: 30_000,
+  coarseCorridorStretch: 1.5,
   conflictWorkerCount: 1,
 };
 
@@ -80,6 +85,9 @@ const normalizeOptions = (
     "expansionsPerStep",
     "heuristicWeight",
     "maxHeuristicWeight",
+    "approximateSearchMinDemandCount",
+    "approximateSearchMaxDemandCount",
+    "approximateSearchMaxGraphNodeCount",
   ] as const) {
     if (!Number.isFinite(normalized[key]) || normalized[key] <= 0) {
       throw new Error(`options.${key} must be greater than zero`);
@@ -100,6 +108,41 @@ const normalizeOptions = (
   if (normalized.maxHeuristicWeight < normalized.heuristicWeight) {
     throw new Error(
       "options.maxHeuristicWeight must be at least options.heuristicWeight",
+    );
+  }
+  if (!Number.isInteger(normalized.beamWidth) || normalized.beamWidth < 0) {
+    throw new Error("options.beamWidth must be zero or a positive integer");
+  }
+  if (!Number.isInteger(normalized.approximateSearchMinDemandCount)) {
+    throw new Error(
+      "options.approximateSearchMinDemandCount must be a positive integer",
+    );
+  }
+  if (!Number.isInteger(normalized.approximateSearchMaxDemandCount)) {
+    throw new Error(
+      "options.approximateSearchMaxDemandCount must be a positive integer",
+    );
+  }
+  if (!Number.isInteger(normalized.approximateSearchMaxGraphNodeCount)) {
+    throw new Error(
+      "options.approximateSearchMaxGraphNodeCount must be a positive integer",
+    );
+  }
+  if (
+    normalized.approximateSearchMaxDemandCount <
+    normalized.approximateSearchMinDemandCount
+  ) {
+    throw new Error(
+      "options.approximateSearchMaxDemandCount must be at least options.approximateSearchMinDemandCount",
+    );
+  }
+  if (
+    !Number.isFinite(normalized.coarseCorridorStretch) ||
+    (normalized.coarseCorridorStretch !== 0 &&
+      normalized.coarseCorridorStretch < 1)
+  ) {
+    throw new Error(
+      "options.coarseCorridorStretch must be zero or at least one",
     );
   }
   if (

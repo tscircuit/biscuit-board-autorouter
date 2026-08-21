@@ -15,6 +15,7 @@ import type {
   BiscuitBoardRoutingStats,
   Point,
   PreparedBiscuitRoutingProblem,
+  RectBounds,
   RouteDemand,
   RoutedConnection,
   RoutingEdge,
@@ -42,6 +43,8 @@ interface ActiveSearch {
   targetTreesByLayer: Map<string, TargetKdNode | null>;
   targetHeuristicGeneration: number;
   heuristicWeight: number;
+  approximate?: true;
+  corridorBounds?: RectBounds;
   nodes: SearchNode[];
   open: MinHeap<number>;
   bestCostByState: Map<number, number>;
@@ -221,6 +224,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
     RouteDemand,
     ActiveSearch["protectedCorridors"]
   >();
+  private exactSearchDemands?: WeakSet<RouteDemand>;
   // Direct-mapped demand caches keep one bounded graph-sized buffer per
   // property instead of retaining one full buffer for every route demand.
   private readonly demandCacheKeyByDemand = new WeakMap<RouteDemand, number>();
@@ -275,6 +279,12 @@ export class RipUpRubberBandSolver extends BaseSolver {
   private targetHeuristicCacheHitCount = 0;
   private targetHeuristicCacheMissCount = 0;
   private maximumHeuristicWeightUsed = 1;
+  private approximateStats?: {
+    searchCount: number;
+    fallbackCount: number;
+    beamTrimCount: number;
+    beamTrimmedEntryCount: number;
+  };
   private connectivityRepairCount = 0;
   private totalRipCount = 0;
   private totalExpandedStateCount = 0;
@@ -544,13 +554,36 @@ export class RipUpRubberBandSolver extends BaseSolver {
       this.activeSearch = this.createSearch(demand, false);
     }
 
-    for (
-      let expansion = 0;
-      expansion < this.prepared.options.expansionsPerStep;
-      expansion++
+    if (this.activeSearch.corridorBounds) {
+      for (
+        let expansion = 0;
+        expansion < this.prepared.options.expansionsPerStep;
+        expansion++
+      ) {
+        if (!this.activeSearch?.corridorBounds || this.failed || this.solved) {
+          break;
+        }
+        this.expandOneCorridorState();
+      }
+    } else {
+      for (
+        let expansion = 0;
+        expansion < this.prepared.options.expansionsPerStep;
+        expansion++
+      ) {
+        if (!this.activeSearch || this.failed || this.solved) break;
+        this.expandOneState();
+      }
+    }
+    const search = this.activeSearch;
+    if (
+      search?.approximate &&
+      this.prepared.options.beamWidth > 0 &&
+      search.open.size > this.prepared.options.beamWidth * 2
     ) {
-      if (!this.activeSearch || this.failed || this.solved) break;
-      this.expandOneState();
+      const trimmed = search.open.trimToSize(this.prepared.options.beamWidth);
+      this.approximateStats!.beamTrimCount++;
+      this.approximateStats!.beamTrimmedEntryCount += trimmed;
     }
     this.progress =
       this.prepared.demandById.size === 0
@@ -653,6 +686,26 @@ export class RipUpRubberBandSolver extends BaseSolver {
     allowBlockers: boolean,
   ): ActiveSearch {
     this.searchCount++;
+    const approximate =
+      this.prepared.options.routeOrder === "adaptive" &&
+      (this.prepared.options.beamWidth > 0 ||
+        this.prepared.options.coarseCorridorStretch > 0) &&
+      this.prepared.demands.length >=
+        this.prepared.options.approximateSearchMinDemandCount &&
+      this.prepared.demands.length <=
+        this.prepared.options.approximateSearchMaxDemandCount &&
+      this.prepared.nodes.length <=
+        this.prepared.options.approximateSearchMaxGraphNodeCount &&
+      !this.exactSearchDemands?.has(demand);
+    if (approximate) {
+      this.approximateStats ??= {
+        searchCount: 0,
+        fallbackCount: 0,
+        beamTrimCount: 0,
+        beamTrimmedEntryCount: 0,
+      };
+      this.approximateStats.searchCount++;
+    }
     const collapseBlockerStates =
       allowBlockers && this.prepared.demands.length >= 64;
     const ownedNodesForNet = this.getOwnedNodesForNet(demand.netId);
@@ -714,15 +767,6 @@ export class RipUpRubberBandSolver extends BaseSolver {
       heuristicWeight,
     );
     const open = new MinHeap<number>();
-    open.push(
-      heuristicWeight *
-        this.heuristicToTargets(
-          sourceNode,
-          targetTreesByLayer,
-          targetHeuristicGeneration,
-        ),
-      0,
-    );
     const preferredLayer = this.preferredLayerByRoute.get(demand.routeId);
     const sourceVisitedPreferredLayer =
       preferredLayer === undefined ||
@@ -733,6 +777,22 @@ export class RipUpRubberBandSolver extends BaseSolver {
     const targetPoint = this.prepared.nodes[demand.targetNode]!;
     const escapeConstraints = this.getTerminalEscapeConstraints(demand);
     const directDistance = pointDistance(sourcePoint, targetPoint);
+    const corridorMargin = Math.max(
+      this.prepared.options.gridPitch * 2,
+      (directDistance * (this.prepared.options.coarseCorridorStretch - 1)) / 2,
+    );
+    const corridorBounds =
+      approximate &&
+      this.prepared.options.coarseCorridorStretch > 0 &&
+      demand.connectionTerminalCount === 2 &&
+      ownedNodesForNet.size === 0
+        ? {
+            minX: Math.min(sourcePoint.x, targetPoint.x) - corridorMargin,
+            minY: Math.min(sourcePoint.y, targetPoint.y) - corridorMargin,
+            maxX: Math.max(sourcePoint.x, targetPoint.x) + corridorMargin,
+            maxY: Math.max(sourcePoint.y, targetPoint.y) + corridorMargin,
+          }
+        : null;
     const isShallowEscapeCorridor = this.isShallowEscapeCorridor(
       demand,
       escapeConstraints,
@@ -761,6 +821,15 @@ export class RipUpRubberBandSolver extends BaseSolver {
       0,
       0,
     );
+    open.push(
+      heuristicWeight *
+        this.heuristicToTargets(
+          sourceNode,
+          targetTreesByLayer,
+          targetHeuristicGeneration,
+        ),
+      0,
+    );
     const initialNode: SearchNode = {
       graphNode: sourceNode,
       stateKey: initialStateKey,
@@ -773,7 +842,7 @@ export class RipUpRubberBandSolver extends BaseSolver {
       requiredViaIndex: 0,
       requiredGuideIndex: 0,
     };
-    return {
+    const search: ActiveSearch = {
       demand,
       allowBlockers,
       collapseBlockerStates,
@@ -809,6 +878,11 @@ export class RipUpRubberBandSolver extends BaseSolver {
       foreignOwnerCacheEntryCount: 0,
       protectedCorridors,
     };
+    if (approximate) {
+      search.approximate = true;
+      if (corridorBounds) search.corridorBounds = corridorBounds;
+    }
+    return search;
   }
 
   private getProtectedCorridors(demand: RouteDemand, directDistance: number) {
@@ -961,6 +1035,10 @@ export class RipUpRubberBandSolver extends BaseSolver {
         this.activeSearch = this.createSearch(search.demand, true);
         return;
       }
+      if (search.approximate) {
+        this.retryExactSearch(search);
+        return;
+      }
       let exhaustedRouteCount = 0;
       for (const ripCount of this.ripCountByRoute) {
         if (ripCount >= this.prepared.options.maxRipsPerRoute) {
@@ -998,6 +1076,10 @@ export class RipUpRubberBandSolver extends BaseSolver {
       return;
     }
     if (search.nodes.length >= this.prepared.options.maxSearchStates) {
+      if (search.approximate) {
+        this.retryExactSearch(search);
+        return;
+      }
       this.fail(
         `A* state limit (${this.prepared.options.maxSearchStates}) reached for "${search.demand.routeId}"`,
       );
@@ -1012,6 +1094,92 @@ export class RipUpRubberBandSolver extends BaseSolver {
         adjacent.toNode,
       );
     }
+  }
+
+  /**
+   * Corridor searches use a separate expansion loop so exact searches do not
+   * pay for a bounds branch on every expanded state.
+   */
+  private expandOneCorridorState() {
+    const search = this.activeSearch;
+    if (!search) return;
+    const searchNodeIndex = search.open.pop();
+    if (searchNodeIndex === undefined) {
+      this.failedSearchCount++;
+      if (!search.allowBlockers) {
+        this.activeSearch = this.createSearch(search.demand, true);
+        return;
+      }
+      if (search.approximate) {
+        this.retryExactSearch(search);
+        return;
+      }
+      let exhaustedRouteCount = 0;
+      for (const ripCount of this.ripCountByRoute) {
+        if (ripCount >= this.prepared.options.maxRipsPerRoute) {
+          exhaustedRouteCount++;
+        }
+      }
+      if (this.releasePrefabViaBridge(search.demand.routeId)) {
+        this.activeSearch = this.createSearch(search.demand, true);
+        return;
+      }
+      this.fail(
+        `No fixed-via route found for "${search.demand.routeId}" with at most ${this.prepared.options.maxBlockersPerSearch} blockers${
+          exhaustedRouteCount > 0
+            ? `; ${exhaustedRouteCount} existing route(s) exhausted their rip budget`
+            : ""
+        }`,
+      );
+      return;
+    }
+    const current = search.nodes[searchNodeIndex]!;
+    const bestCost = search.bestCostByState.get(current.stateKey);
+    if (bestCost === undefined || current.g > bestCost + 1e-9) {
+      return;
+    }
+    search.expanded++;
+    this.totalExpandedStateCount++;
+
+    if (
+      search.targetNodes.has(current.graphNode) &&
+      current.visitedPreferredLayer &&
+      current.requiredViaIndex === search.requiredViaCount &&
+      current.requiredGuideIndex === search.requiredGuideTarget
+    ) {
+      this.commitGoal(search, searchNodeIndex);
+      return;
+    }
+    if (search.nodes.length >= this.prepared.options.maxSearchStates) {
+      this.retryExactSearch(search);
+      return;
+    }
+
+    const bounds = search.corridorBounds!;
+    for (const adjacent of this.prepared.adjacency[current.graphNode]!) {
+      const toNode = this.prepared.nodes[adjacent.toNode]!;
+      if (
+        toNode.x < bounds.minX ||
+        toNode.x > bounds.maxX ||
+        toNode.y < bounds.minY ||
+        toNode.y > bounds.maxY
+      ) {
+        continue;
+      }
+      this.considerEdge(
+        search,
+        searchNodeIndex,
+        adjacent.edgeId,
+        adjacent.toNode,
+      );
+    }
+  }
+
+  private retryExactSearch(search: ActiveSearch) {
+    this.exactSearchDemands ??= new WeakSet();
+    this.exactSearchDemands.add(search.demand);
+    this.approximateStats!.fallbackCount++;
+    this.activeSearch = this.createSearch(search.demand, false);
   }
 
   private considerEdge(
@@ -2822,6 +2990,10 @@ export class RipUpRubberBandSolver extends BaseSolver {
       targetHeuristicCacheHitCount: this.targetHeuristicCacheHitCount,
       targetHeuristicCacheMissCount: this.targetHeuristicCacheMissCount,
       maximumHeuristicWeight: this.maximumHeuristicWeightUsed,
+      approximateSearchCount: this.approximateStats?.searchCount ?? 0,
+      approximateFallbackCount: this.approximateStats?.fallbackCount ?? 0,
+      beamTrimCount: this.approximateStats?.beamTrimCount ?? 0,
+      beamTrimmedEntryCount: this.approximateStats?.beamTrimmedEntryCount ?? 0,
       activeRouteId: this.activeSearch?.demand.routeId ?? null,
       activeExpandedStateCount: this.activeSearch?.expanded ?? 0,
     };

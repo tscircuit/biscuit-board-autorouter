@@ -18,11 +18,16 @@
     ".": {
       "import": "./lib/index.ts",
       "types": "./lib/index.ts"
+    },
+    "./worker-pool": {
+      "import": "./lib/biscuit-board-worker-pool.ts",
+      "types": "./lib/biscuit-board-worker-pool.ts"
     }
   },
   "scripts": {
     "benchmark": "./benchmark.sh",
     "perf:ladder": "bun run scripts/perf-ladder.ts",
+    "perf:pool": "bun run scripts/perf-worker-pool.ts",
     "build": "bunx tsc --noEmit",
     "build:site": "cosmos-export",
     "dev": "cosmos",

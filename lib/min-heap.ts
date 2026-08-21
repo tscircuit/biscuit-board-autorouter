@@ -21,6 +21,23 @@ export class MinHeap<T> {
     this.priorities[index] = priority;
   }
 
+  trimToSize(maxSize: number) {
+    if (this.values.length <= maxSize) return 0;
+    const previousSize = this.values.length;
+    const entries = this.values.map((value, index) => ({
+      value,
+      priority: this.priorities[index]!,
+      index,
+    }));
+    entries.sort(
+      (left, right) =>
+        left.priority - right.priority || left.index - right.index,
+    );
+    this.values = entries.slice(0, maxSize).map(({ value }) => value);
+    this.priorities = entries.slice(0, maxSize).map(({ priority }) => priority);
+    return previousSize - maxSize;
+  }
+
   pop(): T | undefined {
     if (this.values.length === 0) return undefined;
     const root = this.values[0]!;

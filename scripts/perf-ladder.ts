@@ -1,13 +1,13 @@
-import type { SimpleRouteJson } from "@tscircuit/core";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import type { SimpleRouteJson } from "@tscircuit/core";
 import type {
   BiscuitBoardAutorouterOptions,
   BiscuitBoardRoutingStats,
   PreparedBiscuitRoutingProblem,
 } from "../lib";
-import rp2040Input from "../repros/fixtures/repro02-biscuit-board-rp2040.srj.json";
 import stm32Input from "../repros/fixtures/repro01-biscuit-board-stm32.srj.json";
+import rp2040Input from "../repros/fixtures/repro02-biscuit-board-rp2040.srj.json";
 import stm32DisplayInput from "../repros/fixtures/repro03-stm32-display-user-led.srj.json";
 import boosterPackInput from "../repros/fixtures/repro06-stm32-display-boosterpack.srj.json";
 import { forcedPrefabricatedViaFixture } from "../tests/fixtures/forced-prefabricated-via";
@@ -168,6 +168,8 @@ const runWorker = async (
   conflictWorkerCount: number | undefined,
   heuristicWeight: number | undefined,
   routeOrder: BiscuitBoardAutorouterOptions["routeOrder"] | undefined,
+  beamWidth: number | undefined,
+  coarseCorridorStretch: number | undefined,
 ) => {
   const implementation = (
     implementationPath
@@ -182,6 +184,8 @@ const runWorker = async (
     ...(conflictWorkerCount === undefined ? {} : { conflictWorkerCount }),
     ...(heuristicWeight === undefined ? {} : { heuristicWeight }),
     ...(routeOrder === undefined ? {} : { routeOrder }),
+    ...(beamWidth === undefined ? {} : { beamWidth }),
+    ...(coarseCorridorStretch === undefined ? {} : { coarseCorridorStretch }),
   });
   const initialMemory = process.memoryUsage();
   let peakHeapUsedBytes = initialMemory.heapUsed;
@@ -415,6 +419,8 @@ const executeWorker = (
   conflictWorkerCount: number | undefined,
   heuristicWeight: number | undefined,
   routeOrder: BiscuitBoardAutorouterOptions["routeOrder"] | undefined,
+  beamWidth: number | undefined,
+  coarseCorridorStretch: number | undefined,
 ) => {
   const child = Bun.spawnSync({
     cmd: [
@@ -431,6 +437,10 @@ const executeWorker = (
         ? []
         : [`--heuristic-weight=${heuristicWeight}`]),
       ...(routeOrder === undefined ? [] : [`--route-order=${routeOrder}`]),
+      ...(beamWidth === undefined ? [] : [`--beam-width=${beamWidth}`]),
+      ...(coarseCorridorStretch === undefined
+        ? []
+        : [`--corridor-stretch=${coarseCorridorStretch}`]),
     ],
     stdout: "pipe",
     stderr: "pipe",
@@ -494,6 +504,8 @@ const lowMemoryMode = process.argv.includes("--low-memory");
 const conflictWorkerArgument = getArgument("--conflict-workers");
 const heuristicWeightArgument = getArgument("--heuristic-weight");
 const routeOrderArgument = getArgument("--route-order");
+const beamWidthArgument = getArgument("--beam-width");
+const corridorStretchArgument = getArgument("--corridor-stretch");
 const comparisonConflictWorkerArgument = getArgument(
   "--compare-conflict-workers",
 );
@@ -533,6 +545,25 @@ if (
 const routeOrder = routeOrderArgument as
   | BiscuitBoardAutorouterOptions["routeOrder"]
   | undefined;
+const beamWidth =
+  beamWidthArgument === undefined ? undefined : Number(beamWidthArgument);
+if (
+  beamWidth !== undefined &&
+  (!Number.isInteger(beamWidth) || beamWidth < 0)
+) {
+  throw new Error("--beam-width must be zero or a positive integer");
+}
+const coarseCorridorStretch =
+  corridorStretchArgument === undefined
+    ? undefined
+    : Number(corridorStretchArgument);
+if (
+  coarseCorridorStretch !== undefined &&
+  (!Number.isFinite(coarseCorridorStretch) ||
+    (coarseCorridorStretch !== 0 && coarseCorridorStretch < 1))
+) {
+  throw new Error("--corridor-stretch must be zero or at least one");
+}
 const comparisonConflictWorkerCount =
   comparisonConflictWorkerArgument === undefined
     ? undefined
@@ -557,6 +588,8 @@ if (workerCaseId) {
     conflictWorkerCount,
     heuristicWeight,
     routeOrder,
+    beamWidth,
+    coarseCorridorStretch,
   );
 } else {
   const requestedCaseIds = process.argv
@@ -591,6 +624,8 @@ if (workerCaseId) {
               conflictWorkerCount,
               heuristicWeight,
               routeOrder,
+              beamWidth,
+              coarseCorridorStretch,
             ),
           ),
         ),
@@ -616,6 +651,8 @@ if (workerCaseId) {
             : conflictWorkerCount,
           heuristicWeight,
           routeOrder,
+          beamWidth,
+          coarseCorridorStretch,
         );
         (version === "previous" ? previousRuns : currentRuns).push(result);
       }

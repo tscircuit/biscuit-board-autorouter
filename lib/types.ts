@@ -38,6 +38,16 @@ export interface BiscuitBoardAutorouterOptions {
   heuristicWeight?: number;
   /** Upper bound for negotiation-driven heuristic escalation. */
   maxHeuristicWeight?: number;
+  /** Maximum approximate-search frontier. Zero disables beam trimming. */
+  beamWidth?: number;
+  /** Minimum route-demand count before approximate search is enabled. */
+  approximateSearchMinDemandCount?: number;
+  /** Maximum route-demand count eligible for approximate search. */
+  approximateSearchMaxDemandCount?: number;
+  /** Maximum graph-node count eligible for approximate search. */
+  approximateSearchMaxGraphNodeCount?: number;
+  /** Relative padding for the first-pass routing corridor. Zero disables it. */
+  coarseCorridorStretch?: number;
   /**
    * Conflict-index worker threads. Zero selects an automatic bounded count,
    * one disables parallelism, and values above one set the maximum.
@@ -70,6 +80,11 @@ export interface NormalizedBiscuitBoardAutorouterOptions {
   expansionsPerStep: number;
   heuristicWeight: number;
   maxHeuristicWeight: number;
+  beamWidth: number;
+  approximateSearchMinDemandCount: number;
+  approximateSearchMaxDemandCount: number;
+  approximateSearchMaxGraphNodeCount: number;
+  coarseCorridorStretch: number;
   conflictWorkerCount: number;
 }
 
@@ -207,6 +222,10 @@ export interface BiscuitBoardRoutingStats {
   targetHeuristicCacheHitCount?: number;
   targetHeuristicCacheMissCount?: number;
   maximumHeuristicWeight?: number;
+  approximateSearchCount?: number;
+  approximateFallbackCount?: number;
+  beamTrimCount?: number;
+  beamTrimmedEntryCount?: number;
   activeRouteId?: string | null;
   activeExpandedStateCount?: number;
   postProcessedClearance?: number;
